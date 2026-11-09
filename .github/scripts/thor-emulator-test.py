@@ -124,6 +124,23 @@ def export_reports(expected):
     wait("exported ZIP contains both attempts", exported)
 
 
+def fix_pushed_fixture(path):
+    # adbd root can bypass emulated-storage ownership on these userdebug images.
+    # Only adjust generated test files in this disposable AVD's own package.
+    lower = "/data/media/0/" + path.removeprefix("/sdcard/")
+    parent = str(Path(lower).parent)
+    uid = shell("stat", "-c", "%u", f"/data/user/0/{PKG}")
+    gid = shell("stat", "-c", "%g", parent)
+    labels = shell("ls", "-Zd", parent).split()
+    context = next(label for label in labels if label.startswith("u:object_r:"))
+    assert uid.isdecimal() and gid.isdecimal() and re.fullmatch(r"[a-zA-Z0-9_:.,]+", context)
+    shell("chown", "-R", f"{uid}:{gid}", lower)
+    shell("chcon", "-R", context, lower)
+    shell(f"find {lower} -type d -exec chmod 2770 {{}} \\;")
+    shell(f"find {lower} -type f -exec chmod 0660 {{}} \\;")
+    print(shell("ls", "-ldnZ", parent, lower, lower + "/zone/english/common_mp.ff"), flush=True)
+
+
 def presented(attempt):
     for name in ("failure.txt", "crash.txt", "java-error.txt"):
         contents = note(attempt, name)
@@ -202,8 +219,23 @@ def run():
     with ZipFile(incomplete, "w") as archive:
         archive.writestr("placeholder.txt", "synthetic archive lacking a menu font")
     adb("push", incomplete, preferred + "/main/fixture.iwd")
+    fix_pushed_fixture(preferred)
+    launcher_pid = shell("pidof", PKG)
+    failed = new_attempt(missing, "Start / retry")
+    error = wait("native asset failure recorded",
+                 lambda: note(failed, "failure.txt") or note(failed, "crash.txt") or note(failed, "java-error.txt"),
+                 timeout=180)
+    preferred_path = shell("readlink", "-f", preferred)
+    assert preferred_path in error and "images/qa_glyphs.iwi" in error, error
+    assert not note(failed, "ready.txt")
+    visible("images/qa_glyphs.iwi")
+    wait("retry enabled after engine failure", lambda: button("Start / retry") is not None)
+    assert shell("pidof", PKG) == launcher_pid and current() == failed
+    assert "NativeActivity.onCreate acknowledged" in note(failed, "java.log")
+    screenshot("native-asset-error")
     adb("push", str(TEMP / "mw2") + "/.", alternate)
-    menu = new_attempt(missing, "Start / retry")
+    fix_pushed_fixture(alternate)
+    menu = new_attempt(failed, "Start / retry")
     wait("synthetic menu submitted and presented", lambda: presented(menu), timeout=240)
     log = note(menu, "native.log")
     assert "First winit update" in log and "images/qa_glyphs.iwi" in log
