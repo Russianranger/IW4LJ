@@ -244,6 +244,9 @@ pub fn exit_launch_error(message: &str) -> ! {
             );
         }
     }
+    #[cfg(target_os = "android")]
+    exit::exit_now(2);
+    #[cfg(not(target_os = "android"))]
     std::process::exit(2);
 }
 

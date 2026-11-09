@@ -6,6 +6,7 @@ on:
     paths:
       - 'IW4LJ-Android/Cargo.*'
       - 'IW4LJ-Android/crates/**'
+      - '!IW4LJ-Android/crates/approved_tests/android_startup_fixture.py'
       - 'IW4LJ-Android/vendor/**'
       - 'IW4LJ-Android/xtask/**'
       - '.github/workflows/thor-android.yml'

@@ -289,11 +289,18 @@ fn sync_zone_atlases(
 }
 
 fn warm_hud_images(
+    #[cfg(target_os = "android")] screen: Res<AppScreen>,
     catalog: Option<Res<asset_game::MenuCatalog>>,
     compass: Option<Res<assets::SessionCompass>>,
     mut hud_images: ResMut<HudImages>,
     mut images: ResMut<Assets<Image>>,
 ) {
+    #[cfg(target_os = "android")]
+    if matches!(*screen, AppScreen::Loading | AppScreen::MainMenu) {
+        // The frontend requests the textures it actually draws. Warming every HUD
+        // and uploading all zone atlases here blocks winit on unrelated screens.
+        return;
+    }
     hud_images.warm_present_stems(&mut images, catalog.as_deref(), compass.as_deref());
 }
 
@@ -606,7 +613,6 @@ fn flush_targetmap_tess(
 
 fn flush_script_menus_tess(
     surface: Res<crate::surface::Hud2dSurface>,
-    #[cfg(target_os = "android")] menus: crate::MenuState,
     mut pass: ResMut<HudTessPass>,
     mut hud_images: ResMut<HudImages>,
     mut images: ResMut<Assets<Image>>,
@@ -635,8 +641,11 @@ fn flush_script_menus_tess(
             surface.height(),
         );
         #[cfg(target_os = "android")]
-        if menus.is_some_and(|state| state.position("iw4l_main").is_some()) {
-            frame.main_menu_batches = first_batch..frame.batches.len();
+        if let Some(label) = pass.main_menu_label_image {
+            frame.main_menu_label_batch = frame.batches[first_batch..]
+                .iter()
+                .position(|batch| batch.image.id() == label)
+                .map(|offset| first_batch + offset);
         }
     }
 }

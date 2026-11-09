@@ -86,6 +86,13 @@ impl ConsoleRegistry {
         self.commands.push(spec);
     }
 
+    #[cfg(target_os = "android")]
+    pub fn install_menu_maps(&mut self, maps: &ui::MenuMapList) {
+        if let Some(command) = self.commands.iter_mut().find(|spec| spec.name == "map") {
+            command.args = vec![Arc::new(StaticCompleter::new(maps.maps().cloned()))];
+        }
+    }
+
     pub fn names(&self) -> Vec<String> {
         let mut names: Vec<String> = self
             .commands

@@ -322,6 +322,15 @@ public class GameActivity extends NativeActivity implements InputManager.InputDe
     }
 
     @Override
+    protected void onStart() {
+        StartupReport.event(attempt, "NativeActivity.onStart begin");
+        long begin = android.os.SystemClock.elapsedRealtime();
+        super.onStart();
+        long elapsed = android.os.SystemClock.elapsedRealtime() - begin;
+        StartupReport.event(attempt, "NativeActivity.onStart acknowledged after " + elapsed + " ms");
+    }
+
+    @Override
     protected void onResume() {
         StartupReport.event(attempt, "NativeActivity.onResume begin");
         super.onResume();

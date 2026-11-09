@@ -226,31 +226,48 @@ final class StartupReport {
             long end = next == null ? Long.MAX_VALUE : Long.parseLong(read(next, "started.ms", 64));
             List<ApplicationExitInfo> exits = context.getSystemService(ActivityManager.class)
                 .getHistoricalProcessExitReasons(context.getPackageName(), pid, 32);
-            StringBuilder status = new StringBuilder();
             for (ApplicationExitInfo exit : exits) {
                 if (exit.getTimestamp() < since || exit.getTimestamp() >= end
                     || !engine.equals(exit.getProcessName())) continue;
+                String id = exit.getTimestamp() + "-" + exit.getPid();
+                String record = "android-exit-" + id + ".txt";
+                StringBuilder status = new StringBuilder();
                 status.append(new Date(exit.getTimestamp())).append(" pid=").append(exit.getPid())
                     .append(' ').append(reason(exit.getReason())).append(" status=").append(exit.getStatus())
                     .append(" pss=").append(exit.getPss()).append(" KiB rss=").append(exit.getRss())
                     .append(" KiB\n").append(exit.getDescription()).append('\n');
-                File trace = new File(dir, "android-trace-" + exit.getTimestamp() + ".bin");
+                File trace = new File(dir, "android-trace-" + id + ".bin");
                 if (!trace.exists()) {
                     try (InputStream input = exit.getTraceInputStream()) {
                         if (input != null) {
-                            try (FileOutputStream out = new FileOutputStream(trace)) {
-                                if (copy(input, out, 4 * 1024 * KIB)) {
-                                    status.append("Trace capped at 4 MiB.\n");
+                            File temp = File.createTempFile(".trace-", null, dir);
+                            try {
+                                try (FileOutputStream out = new FileOutputStream(temp)) {
+                                    if (copy(input, out, 4 * 1024 * KIB)) {
+                                        status.append("Trace capped at 4 MiB.\n");
+                                    }
                                 }
+                                Files.move(temp.toPath(), trace.toPath(), StandardCopyOption.ATOMIC_MOVE,
+                                    StandardCopyOption.REPLACE_EXISTING);
+                            } finally {
+                                temp.delete();
                             }
                         }
                     } catch (Exception ex) {
                         status.append("Trace unavailable: ").append(ex).append('\n');
                     }
                 }
+                if (!present(dir, record)) write(dir, record, status.toString());
             }
-            if (status.length() == 0) status.append("No matching Android exit record available.");
-            write(dir, "exit-info.txt", status.toString());
+            File[] records = dir.listFiles(f -> f.getName().startsWith("android-exit-") && f.isFile());
+            if (records != null && records.length > 0) {
+                Arrays.sort(records, Comparator.comparing(File::getName).reversed());
+                StringBuilder history = new StringBuilder();
+                for (File record : records) history.append(read(dir, record.getName(), 8 * KIB)).append('\n');
+                write(dir, "exit-info.txt", history.toString());
+            } else if (!present(dir, "exit-info.txt")) {
+                write(dir, "exit-info.txt", "No matching Android exit record available.");
+            }
             if (pid > 0 && !present(dir, "logcat.txt")) captureLogcat(dir, pid);
         } catch (Exception ex) {
             event(dir, "Exit evidence unavailable: " + ex);
@@ -273,6 +290,7 @@ final class StartupReport {
     }
 
     static void export(Context context, OutputStream target) throws IOException {
+        for (File attempt : attempts(context)) collect(context, attempt);
         try (ZipOutputStream zip = new ZipOutputStream(target)) {
             File latest = latest(context);
             zip.putNextEntry(new ZipEntry("summary.txt"));

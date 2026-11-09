@@ -157,6 +157,38 @@ pub struct HudImages {
 }
 
 impl HudImages {
+    pub fn for_menu_root(games_root: PathBuf, trees: NamespaceTrees) -> Self {
+        let images = Self { games_root, trees, ..Self::default() };
+        images.log_trees();
+        images
+    }
+
+
+    #[cfg(target_os = "android")]
+    pub(crate) fn missing_menu_atlas(
+        &self,
+        published: Option<&asset_material::UiImagePublication>,
+        material: &str,
+    ) {
+        if !published.is_some_and(|published| published.id() == self.ui_images.id()) {
+            return;
+        }
+        static REPORTED: std::sync::Once = std::sync::Once::new();
+        REPORTED.call_once(|| {
+            let key = cache_key(material);
+            let image = self.material_images.get(&key).map_or(material, String::as_str);
+            let cause = if self.zone_states.get(&key) == Some(&None) {
+                "The menu font material has no supported render state"
+            } else {
+                "The menu font atlas could not be decoded from the loaded FastFiles or IWDs"
+            };
+            diag::android_failure(&format!(
+                "{cause}: material {material}, image {image}, installation {}. Restore zone/ and main/ from MW2 Multiplayer or export this report.",
+                self.games_root.display()
+            ));
+        });
+    }
+
     pub fn adopt_ui_images(&mut self, publication: &asset_material::UiImagePublication) {
         if self.ui_images.id() == publication.id() {
             return;

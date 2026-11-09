@@ -386,6 +386,7 @@ struct PreparedMenu {
     menus: asset_game::MenuCatalog,
     strings: Option<asset_game::LocalizeCatalog>,
     maps: MenuMapList,
+    hud_images: hud::HudImages,
     audio: Option<audio::FrontendAudio>,
     master: net::MasterLaunchIntent,
     common: ShellCommonTask,
@@ -461,6 +462,7 @@ fn prepare_menu(
         audio::FrontendAudio { bank, clips }
     });
     PreparedMenu {
+        hud_images: hud::HudImages::for_menu_root(games.0.clone(), namespace_trees),
         games,
         ui_games,
         common: ShellCommonTask {
@@ -488,6 +490,11 @@ fn install_menu(world: &mut World, menu: PreparedMenu) {
     if let Some(audio) = menu.audio {
         world.insert_resource(audio);
     }
+    #[cfg(target_os = "android")]
+    world
+        .resource_mut::<console::ConsoleRegistry>()
+        .install_menu_maps(&menu.maps);
+    world.insert_resource(menu.hud_images);
     world.insert_resource(menu.maps);
     world.insert_resource(UiAssetRoot(Some(menu.ui_games.0)));
     world.insert_resource(StartupCommands {

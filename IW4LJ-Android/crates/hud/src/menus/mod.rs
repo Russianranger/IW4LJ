@@ -199,6 +199,8 @@ pub(crate) struct MenuInputs<'w, 's> {
     frontend_strings: Option<Res<'w, asset_game::LocalizeCatalog>>,
     player_data: Option<Res<'w, sim::LocalPlayerData>>,
     content_loading: Option<Res<'w, frame::FrontendContentLoading>>,
+    #[cfg(target_os = "android")]
+    ui_images: Option<Res<'w, asset_material::UiImagePublication>>,
 }
 
 #[derive(Default)]
@@ -269,6 +271,10 @@ pub(crate) fn update_script_menus(
         .as_deref_mut()
         .unwrap_or(&mut local_states.1.0);
     pass.script_menus = TessJob::Hide;
+    #[cfg(target_os = "android")]
+    {
+        pass.main_menu_label_image = None;
+    }
     if transitions
         .read()
         .any(|event| event.exited == Some(frame::MatchScope::Live))
@@ -731,7 +737,17 @@ pub(crate) fn update_script_menus(
     menus.reported = reported;
     let mut fonts: HashMap<String, &asset_game::FontDef> = HashMap::new();
     for cmd in &list.cmds {
-        let _ = hud_images.get_native(cmd.material_namespace, &cmd.material, &mut images);
+        let _image = hud_images.get_native(cmd.material_namespace, &cmd.material, &mut images);
+        #[cfg(target_os = "android")]
+        if pass.main_menu_label_image.is_none()
+            && matches!(&cmd.op, Draw2dOp::TextRun { .. })
+            && matches!(&cmd.provenance, crate::Draw2dProvenance::MenuItem { menu, .. } if menu == "iw4l_main")
+        {
+            pass.main_menu_label_image = _image.map(|image| image.id());
+            if pass.main_menu_label_image.is_none() && input.content_loading.is_none() {
+                hud_images.missing_menu_atlas(input.ui_images.as_deref(), &cmd.material);
+            }
+        }
         if let Draw2dOp::TextRun { font, .. } = &cmd.op
             && !fonts.contains_key(font)
             && let Some(def) = catalog.font(font)

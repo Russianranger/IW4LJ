@@ -1,0 +1,96 @@
+name: Thor Android emulator checks
+on:
+  workflow_call: {}
+  workflow_dispatch:
+    inputs:
+      build_run:
+        description: 'Thor Android build run ID (leave empty for latest matching build)'
+        type: string
+        required: false
+  push:
+    branches: ['repair/thor-startup']
+    paths:
+      - '.github/workflows/thor-emulator.yml'
+      - '.github/thor-release.json'
+      - '.github/scripts/thor-emulator-*'
+      - 'IW4LJ-Android/crates/approved_tests/android_startup_fixture.py'
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  emulator:
+    if: github.ref == 'refs/heads/repair/thor-startup'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 80
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Retrieve ARM64 build
+        env:
+          BUILD_RUN: ${{ inputs.build_run }}
+        run: bash .github/scripts/thor-emulator-artifact.sh
+      - name: Prepare disposable emulator-signed APKs
+        run: |
+          sdkmanager=$(find "$ANDROID_HOME/cmdline-tools" -type f -name sdkmanager | sort -V | tail -1)
+          "$sdkmanager" 'build-tools;35.0.0' 'platform-tools' 'emulator' 'system-images;android-33;google_apis;x86_64'
+          bt="$ANDROID_HOME/build-tools/35.0.0"
+          apk="$RUNNER_TEMP/thor-build/IW4LJ-Thor-aligned-unsigned.apk"
+          # This key signs only temporary emulator copies. No signed APK or key is uploaded.
+          keytool -genkeypair -keystore "$RUNNER_TEMP/qa.jks" -alias qa -keyalg RSA -keysize 2048 \
+            -dname 'CN=Ephemeral CI fixture' -validity 2 -storepass android -keypass android
+          "$bt/apksigner" sign --ks "$RUNNER_TEMP/qa.jks" --ks-pass pass:android --out "$RUNNER_TEMP/application.apk" "$apk"
+          # Keep the DEX, manifest and ABI while deliberately removing the engine.
+          cp "$apk" "$RUNNER_TEMP/missing-engine.apk"
+          zip -qd "$RUNNER_TEMP/missing-engine.apk" lib/arm64-v8a/libiw4l_android.so
+          "$bt/zipalign" -f -P 16 4 "$RUNNER_TEMP/missing-engine.apk" "$RUNNER_TEMP/missing-aligned.apk"
+          "$bt/apksigner" sign --ks "$RUNNER_TEMP/qa.jks" --ks-pass pass:android --out "$RUNNER_TEMP/loader-test.apk" "$RUNNER_TEMP/missing-aligned.apk"
+      - name: Boot accelerated API 33 Google APIs emulator
+        run: |
+          test -c /dev/kvm
+          sudo setfacl -m "u:$(id -un):rw" /dev/kvm
+          mgr=$(find "$ANDROID_HOME/cmdline-tools" -type f -name avdmanager | sort -V | tail -1)
+          printf 'no\n' | "$mgr" create avd --force -n iw4l_qa -k 'system-images;android-33;google_apis;x86_64' -d pixel_2
+          "$ANDROID_HOME/emulator/emulator" -avd iw4l_qa -port 5554 -accel on \
+            -gpu swiftshader -feature Vulkan -no-window -no-snapshot -no-audio \
+            -no-boot-anim -memory 4096 -cores 2 >"$QA_OUT/emulator.log" 2>&1 </dev/null &
+          export ANDROID_SERIAL=emulator-5554
+          export PATH="$ANDROID_HOME/platform-tools:$PATH"
+          timeout 480 sh -c 'until [ "$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d "\r")" = 1 ]; do sleep 3; done'
+          adb root
+          adb wait-for-device
+          adb shell getprop > "$QA_OUT/properties.txt"
+          adb shell input keyevent KEYCODE_WAKEUP
+          adb shell wm dismiss-keyguard
+          adb shell settings put global window_animation_scale 0
+          adb shell settings put global transition_animation_scale 0
+          adb shell settings put global animator_duration_scale 0
+          echo ANDROID_SERIAL=emulator-5554 >> "$GITHUB_ENV"
+          echo "$ANDROID_HOME/platform-tools" >> "$GITHUB_PATH"
+      - name: Exercise launcher, real ARM64 loader, diagnostics and synthetic menu presentation
+        timeout-minutes: 18
+        run: |
+          python3 IW4LJ-Android/crates/approved_tests/android_startup_fixture.py "$RUNNER_TEMP/mw2"
+          python3 -u .github/scripts/thor-emulator-test.py
+      - name: Collect emulator evidence
+        if: always()
+        timeout-minutes: 2
+        run: |
+          mkdir -p "$QA_OUT"
+          adb="$ANDROID_HOME/platform-tools/adb"
+          "$adb" -s emulator-5554 logcat -b all -d -t 8000 > "$QA_OUT/logcat.txt" 2>&1 || true
+          "$adb" -s emulator-5554 shell dumpsys activity activities > "$QA_OUT/activities.txt" 2>&1 || true
+          "$adb" -s emulator-5554 pull /data/user/0/dev.iw4j.iw4l.thor/files/startup "$QA_OUT/startup" || true
+          "$adb" -s emulator-5554 emu kill || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: thor-api33-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.QA_OUT }}/
+          if-no-files-found: warn
+          retention-days: 14

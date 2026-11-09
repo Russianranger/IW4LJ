@@ -12,7 +12,8 @@ import java.util.LinkedHashSet;
 
 public final class EngineLoaderActivity extends Activity {
     static final int RECYCLE = RESULT_FIRST_USER;
-    private static String loadedAttempt;
+    private static volatile String processAttempt;
+    private static boolean libraryLoaded;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -22,7 +23,7 @@ public final class EngineLoaderActivity extends Activity {
         status.setGravity(android.view.Gravity.CENTER);
         status.setText("Loading the ARM64 game library…");
         setContentView(status);
-        if (loadedAttempt != null && !loadedAttempt.equals(dir.getName())) {
+        if (processAttempt != null && !processAttempt.equals(dir.getName())) {
             // winit and the Rust task pools are process singletons. Recycle only
             // this idle engine process between explicit attempts, before JNI.
             StartupReport.event(dir, "restarting an earlier engine process");
@@ -31,6 +32,7 @@ public final class EngineLoaderActivity extends Activity {
             android.os.Process.killProcess(android.os.Process.myPid());
             return;
         }
+        processAttempt = dir.getName();
         new Thread(() -> {
             try {
                 prepare(this, dir);
@@ -56,9 +58,9 @@ public final class EngineLoaderActivity extends Activity {
         }, "iw4l-loader").start();
     }
 
-    static synchronized File attemptFor(Activity activity) {
+    static File attemptFor(Activity activity) {
         File dir = StartupReport.from(activity.getIntent(), activity);
-        if (loadedAttempt == null && StartupReport.present(dir, "engine.pid")) {
+        if (processAttempt == null && StartupReport.present(dir, "engine.pid")) {
             File interrupted = dir;
             try {
                 dir = StartupReport.begin(activity);
@@ -80,7 +82,14 @@ public final class EngineLoaderActivity extends Activity {
             String value = Os.getenv(key);
             if (value != null) candidates.add(new File(value, "mw2"));
         }
-        StringBuilder error = new StringBuilder("Missing MW2 multiplayer files. Looked for:\n");
+        String override = Os.getenv("IW4L_GAMES");
+        if (override != null && !override.isEmpty()) candidates.add(new File(override));
+        String settings = Os.getenv("IW4L_SETTINGS_PATH");
+        File config = settings == null
+            ? new File(Os.getenv("XDG_CONFIG_HOME"), "iw4l/settings.cfg") : new File(settings);
+        // Additional user-selected roots are decoded by the engine.
+        if (config.isFile()) return true;
+        StringBuilder error = new StringBuilder("No accessible MW2 multiplayer directories. Looked for:\n");
         for (File root : candidates) {
             File zone = new File(root, "zone");
             File main = new File(root, "main");
@@ -96,7 +105,11 @@ public final class EngineLoaderActivity extends Activity {
     }
 
     static synchronized void prepare(Activity context, File dir) throws Exception {
-        if (dir.getName().equals(loadedAttempt)) return;
+        if (processAttempt != null && !dir.getName().equals(processAttempt)) {
+            throw new IllegalStateException("The game process is still configured for an earlier attempt");
+        }
+        processAttempt = dir.getName();
+        if (libraryLoaded) return;
         StartupReport.boundAttempt = dir;
         StartupReport.write(dir, "engine.pid", String.valueOf(android.os.Process.myPid()));
         File privateFiles = context.getFilesDir();
@@ -118,7 +131,7 @@ public final class EngineLoaderActivity extends Activity {
         RuntimeEnvironment.configure(media, files, privateFiles, dir);
         StartupReport.event(dir, "System.loadLibrary(iw4l_android)");
         System.loadLibrary("iw4l_android");
-        loadedAttempt = dir.getName();
+        libraryLoaded = true;
         StartupReport.event(dir, "ARM64 library loaded");
     }
 }

@@ -34,6 +34,8 @@ pub fn run_exit_hooks() {
 }
 
 pub fn exit_now(code: i32) -> ! {
+    #[cfg(target_os = "android")]
+    crate::android_event(&format!("Engine requested process exit with status {code}"));
     run_exit_hooks();
     #[cfg(unix)]
     {

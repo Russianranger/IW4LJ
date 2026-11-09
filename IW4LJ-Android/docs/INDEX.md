@@ -5,6 +5,7 @@ game. Keep them this short: nobody opens a long file twice.
 
 | file | about | when to read |
 |---|---|---|
+| [Thor startup repair](THOR-STARTUP.md) | side-by-side APK, game-data paths, startup reports and validation | testing Android startup on the AYN Thor |
 | [`BUILD.md`](BUILD.md) | system packages per distro (Fedora / Debian / Arch), macOS, what the Windows cross build needs | before your first build |
 | [`RUN.md`](RUN.md) | running (`make map`, `--cmds`), controls frozen until `Playing`, `force_match_start`, sync-by-default, the verb list and the traps | before your first live run |
 | [`WINDOWS.md`](WINDOWS.md) | portable `iw4l.exe`: community updates, shortcuts into CoD, writable `iw4l-artifacts/` | building and running on Windows |

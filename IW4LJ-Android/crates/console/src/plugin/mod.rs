@@ -828,6 +828,9 @@ fn setup_console(
     crate::debug_fx_marks::register_fx_mark_commands(&mut registry);
     binds.apply_defaults();
 
+    #[cfg(target_os = "android")]
+    let maps = Vec::new();
+    #[cfg(not(target_os = "android"))]
     let maps = asset_transport::games_root_from_env()
         .map(|root| asset_transport::list_mp_maps(&root))
         .unwrap_or_default();

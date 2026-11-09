@@ -108,7 +108,7 @@ struct ExtractedIwTess(
 #[cfg(target_os = "android")]
 #[derive(Default)]
 struct FirstMenuFrame {
-    batches: std::ops::Range<usize>,
+    label_batch: Option<usize>,
     drew_menu: bool,
     acquired_surface: bool,
     presented: bool,
@@ -120,7 +120,7 @@ fn before_present(
     windows: Query<&bevy::render::view::ExtractedWindow, With<bevy::window::PrimaryWindow>>,
 ) {
     let frame = &mut tess.1;
-    frame.acquired_surface = !frame.presented && !frame.batches.is_empty()
+    frame.acquired_surface = !frame.presented && frame.label_batch.is_some()
         && windows.single().is_ok_and(|window| window.swap_chain_texture.is_some());
 }
 
@@ -135,7 +135,7 @@ fn after_present(
         && windows.single().is_ok_and(|window| window.swap_chain_texture.is_none())
     {
         frame.presented = true;
-        diag::android_ready("Presented primary surface frame with IW4 main menu draws");
+        diag::android_ready("Presented primary surface frame with IW4 main menu text");
     }
 }
 
@@ -293,7 +293,7 @@ fn init_pipeline(
 fn extract_iw_tess(mut extracted: ResMut<ExtractedIwTess>, frame: Extract<Res<HudTessGpuFrame>>) {
     #[cfg(target_os = "android")]
     {
-        extracted.1.batches = frame.main_menu_batches.clone();
+        extracted.1.label_batch = frame.main_menu_label_batch;
         extracted.1.drew_menu = false;
     }
     extracted.0 = ExtractedTessFrame {
@@ -613,6 +613,16 @@ fn draw_iw_tess(
             }
         };
         if cache.get_render_pipeline(id).is_none() {
+            #[cfg(target_os = "android")]
+            if extracted.1.label_batch == Some(geom.batch_i)
+                && let bevy::render::render_resource::CachedPipelineState::Err(
+                    error @ (bevy::shader::ShaderCacheError::ProcessShaderError(_)
+                        | bevy::shader::ShaderCacheError::CreateShaderModule(_)),
+                ) = cache.get_render_pipeline_state(id)
+            {
+                static REPORTED: std::sync::Once = std::sync::Once::new();
+                REPORTED.call_once(|| diag::android_failure(&format!("Main menu shader {SHADER_PATH}: {error}")));
+            }
             continue;
         }
         prepared.push((id, bind, textures, geom));
@@ -668,7 +678,7 @@ fn draw_iw_tess(
         pass.draw_indexed(start..end, 0, 0..1);
         #[cfg(target_os = "android")]
         {
-            drew_menu |= extracted.1.batches.contains(&geom.batch_i);
+            drew_menu |= extracted.1.label_batch == Some(geom.batch_i);
         }
     }
     drop(pass);

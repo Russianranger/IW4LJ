@@ -65,7 +65,7 @@ pub struct ShellshockScreen {
 #[derive(Resource, Clone, Debug, Default)]
 pub struct HudTessGpuFrame {
     #[cfg(target_os = "android")]
-    pub main_menu_batches: std::ops::Range<usize>,
+    pub main_menu_label_batch: Option<usize>,
     pub vertices: Vec<HudTessVertex>,
     pub indices: Vec<u16>,
     pub batches: Vec<HudTessBatch>,
@@ -82,7 +82,7 @@ impl HudTessGpuFrame {
     pub fn clear_geometry(&mut self) {
         #[cfg(target_os = "android")]
         {
-            self.main_menu_batches = 0..0;
+            self.main_menu_label_batch = None;
         }
         self.vertices.clear();
         self.indices.clear();
@@ -185,6 +185,8 @@ pub enum TessJob {
 
 #[derive(Resource, Default)]
 pub struct HudTessPass {
+    #[cfg(target_os = "android")]
+    pub(crate) main_menu_label_image: Option<AssetId<Image>>,
     pub overhead_names: TessJob,
     pub compass: TessJob,
     pub scorebar: TessJob,

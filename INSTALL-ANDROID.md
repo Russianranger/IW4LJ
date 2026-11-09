@@ -1,5 +1,7 @@
 # Install IW4LJ on Android
 
+The **Thor startup repair branch** has a separate test APK and storage paths. See [Thor test installation and diagnostics](IW4LJ-Android/docs/THOR-STARTUP.md).
+
 You need: an Android 12+ phone (arm64, 6 GB RAM or more recommended), a copy of
 **Modern Warfare 2 multiplayer** you own (about 12 GB: the `zone` and `main`
 folders), and the IW4LJ APK.

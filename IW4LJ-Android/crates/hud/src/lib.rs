@@ -44,6 +44,7 @@ pub use gpu_list::{
     HudTessBatch, HudTessGpuFrame, HudTessTechnique, HudTessVertex, ShellshockScreen,
 };
 pub use hudelem::HudElemSoundLatch;
+pub use images::HudImages;
 pub use menus::{MenuState, ScriptMenus};
 pub use overhead_names::{
     OverheadPosedHead, OverheadPosedModelFrame, OverheadPosedPlayerFrame,

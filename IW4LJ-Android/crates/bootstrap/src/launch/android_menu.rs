@@ -69,8 +69,21 @@ pub(super) fn run(games: asset_transport::GamesRoot, artifacts: PathBuf, cheats:
 }
 
 fn prepare(roots: &[PathBuf]) -> Result<PreparedMenu, String> {
-    let (games, menus, report) =
-        asset_game::android_startup_menu(roots, ui::install_frontend_menus)?;
+    let (games, menus, report) = asset_game::android_startup_menu(roots, |catalog| {
+        ui::install_frontend_menus(catalog)?;
+        // The selectable frontend rows use IW4's smallfont (font enum 3).
+        if !catalog.font("fonts/smallfont").is_some_and(|font| {
+            font.pixel_height > 0
+                && !font.material.is_empty()
+                && b"CREATE".iter().all(|letter| {
+                    font.glyph(u32::from(*letter))
+                        .is_some_and(|g| g.pixel_width > 0 && g.pixel_height > 0)
+                })
+        }) {
+            return Err("MW2 menu font fonts/smallfont has no usable glyphs or material; restore the corresponding multiplayer FastFiles.".into());
+        }
+        Ok(())
+    })?;
     for line in report {
         diag::info!(Launch, "{line}");
     }

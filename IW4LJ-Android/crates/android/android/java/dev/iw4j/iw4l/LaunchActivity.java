@@ -142,10 +142,8 @@ public final class LaunchActivity extends Activity {
             refresh();
         } else if (request == EXPORT && result == RESULT_OK && data != null && data.getData() != null) {
             Uri uri = data.getData();
-            File dir = attempt;
             worker.submit(() -> {
                 try {
-                    StartupReport.collect(this, dir);
                     try (OutputStream out = getContentResolver().openOutputStream(uri, "wt")) {
                         if (out == null) throw new IOException("Document provider returned no stream");
                         StartupReport.export(this, out);

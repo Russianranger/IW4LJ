@@ -9,7 +9,7 @@ tools="$sdk/build-tools/35.0.0"
 android_jar="$sdk/platforms/android-34/android.jar"
 toolchain="$ndk/toolchains/llvm/prebuilt/linux-x86_64"
 target=aarch64-linux-android
-out=$(realpath -m "${1:-$workspace/dist/thor}")
+out=$(realpath -m "${1:-$workspace/target/thor-package}")
 mkdir -p "$out"
 work=$(mktemp -d "$out/work.XXXXXX")
 trap 'rm -rf "$work"' EXIT

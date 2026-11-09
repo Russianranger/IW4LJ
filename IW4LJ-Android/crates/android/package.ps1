@@ -7,7 +7,7 @@
 #
 #   .\package.ps1
 #
-# Output: $Build\iw4l.apk
+# Outputs are printed under a fresh subfolder of $Build.
 
 param(
     [string]$Sdk = $env:ANDROID_HOME,
@@ -21,7 +21,9 @@ param(
 $ErrorActionPreference = "Stop"
 if (-not $Sdk -or -not $Jdk) { throw "Specify -Sdk and -Jdk or set ANDROID_HOME and JAVA_HOME" }
 if (-not $Ndk) { $Ndk = Join-Path $Sdk "ndk\28.2.13676358" }
-function Invoke-Checked($File, [Parameter(ValueFromRemainingArguments=$true)][object[]]$Arguments) {
+function Invoke-Checked {
+    $File = $args[0]
+    $Arguments = @($args | Select-Object -Skip 1)
     & $File @Arguments
     if ($LASTEXITCODE -ne 0) { throw "$File failed with exit code $LASTEXITCODE" }
 }
@@ -50,8 +52,9 @@ Push-Location $root
 # The library is linked with its symbols and stripped below for the APK, so the
 # copy under target\ can name the frames of a crash or a heap-probe report.
 $env:CARGO_PROFILE_PLAY_STRIP = "none"
+$env:CARGO_PROFILE_PLAY_DEBUG = "line-tables-only"
 $featureArgs = if ($Features) { @("--features", $Features) } else { @() }
-Invoke-Checked cargo build --locked -p iw4l-android --profile play --target aarch64-linux-android @featureArgs
+Invoke-Checked cargo rustc --locked -p iw4l-android --profile play --target aarch64-linux-android @featureArgs -- "-Clink-arg=-Wl,--build-id=sha1"
 Pop-Location
 
 $so = Join-Path $root "target\aarch64-linux-android\play\libiw4l_android.so"
