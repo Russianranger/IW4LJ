@@ -5,27 +5,35 @@ qa_out="$RUNNER_TEMP/thor-qa"
 mkdir -p "$qa_out"
 echo "QA_OUT=$qa_out" >> "$GITHUB_ENV"
 api="repos/$GITHUB_REPOSITORY/actions"
+same_inputs() {
+    git merge-base --is-ancestor "$1" HEAD &&
+        git diff --quiet "$1" HEAD -- IW4LJ-Android/Cargo.toml IW4LJ-Android/Cargo.lock \
+            IW4LJ-Android/.cargo IW4LJ-Android/crates IW4LJ-Android/vendor IW4LJ-Android/xtask \
+            .github/workflows/thor-android.yml \
+            ':!IW4LJ-Android/crates/approved_tests/android_startup_fixture.py'
+}
 expected_sha=""
+build_run=""
 if [[ "$GITHUB_WORKFLOW" == "Thor Android build" ]]; then
     build_run=$GITHUB_RUN_ID
 elif [[ -n "${BUILD_RUN:-}" ]]; then
     [[ "$BUILD_RUN" =~ ^[0-9]+$ ]] || { echo "::error::Invalid build run ID"; exit 1; }
     build_run=$BUILD_RUN
 elif [[ -f .github/thor-release.json ]]; then
-    build_run=$(jq -er '.run_id | numbers' .github/thor-release.json)
-    expected_sha=$(jq -er '.source_sha | select(test("^[a-f0-9]{40}$"))' .github/thor-release.json)
-else
-    # QA-only pushes can reuse an existing or in-flight build. Match the
-    # packaged sources, permitting changes to the diagnostic harness and docs.
-    build_run=""
+    receipt_sha=$(jq -er '.source_sha | select(test("^[a-f0-9]{40}$"))' .github/thor-release.json)
+    if same_inputs "$receipt_sha"; then
+        expected_sha=$receipt_sha
+        build_run=$(jq -er '.run_id | numbers' .github/thor-release.json)
+    fi
+fi
+if [[ -z "$build_run" ]]; then
+    # A newer native change invalidates the last release receipt. Wait for
+    # the Actions index if this push triggered a matching build in parallel.
     index_deadline=$((SECONDS + 120))
     while [[ -z "$build_run" ]] && (( SECONDS < index_deadline )); do
         runs=$(gh api "$api/runs?branch=repair%2Fthor-startup&per_page=50")
         while read -r id source; do
-            git merge-base --is-ancestor "$source" HEAD || continue
-            if git diff --quiet "$source" HEAD -- IW4LJ-Android/Cargo.toml IW4LJ-Android/Cargo.lock \
-                    IW4LJ-Android/.cargo IW4LJ-Android/crates IW4LJ-Android/vendor IW4LJ-Android/xtask \
-                    ':!IW4LJ-Android/crates/approved_tests/android_startup_fixture.py'; then
+            if same_inputs "$source"; then
                 build_run=$id
                 break
             fi

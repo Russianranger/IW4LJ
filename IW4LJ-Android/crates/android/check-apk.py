@@ -53,6 +53,7 @@ xml = run(tools / "aapt", "dump", "xmltree", apk, "AndroidManifest.xml")
 prefix = "dev/iw4j/iw4l/"
 components = ("LaunchActivity", "GameActivity", "EngineLoaderActivity", "StartupApplication")
 expected_methods = {
+    "nativeConfigureEnvironment": "([B)I", "nativeRequestShutdown": "()V",
     "nativeTouch": "(IIFF)V", "nativePadButton": "(IIZ)V", "nativePadAxes": "(IFFFFFFFF)V",
     "nativePadRemoved": "(I)V", "nativeTakeRumble": "()Z", "nativeRumbleField": "(I)F",
     "nativeTakePrompt": "()I", "nativeTypedChar": "(I)V", "nativeTypedDone": "(I)V",

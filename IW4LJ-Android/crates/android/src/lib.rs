@@ -6,7 +6,7 @@
 //! data and artifacts, then hands control to `bootstrap`, which assembles
 //! and runs the same `App` the desktop build does.
 
-use std::path::PathBuf;
+mod launch_environment;
 
 use bevy::prelude::*;
 
@@ -25,15 +25,12 @@ static HEAP: heap_probe::Probe = heap_probe::Probe;
 #[global_allocator]
 static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-fn launch_path(name: &str) -> PathBuf {
-    std::env::var_os(name)
-        .map(PathBuf::from)
-        .unwrap_or_else(|| panic!("Android launcher did not supply {name}"))
-}
-
 #[bevy_main]
 fn main() {
-    let attempt = launch_path("IW4L_STARTUP_DIR");
+    let (Some(attempt), Some(paths)) = (launch_environment::ATTEMPT.get(), launch_environment::PATHS.get()) else {
+        launch_environment::missing_handoff();
+        return;
+    };
     let crash_file = attempt.join("crash.txt");
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
@@ -48,15 +45,12 @@ fn main() {
         }
         default_hook(info);
     }));
-    diag::init_log(&attempt);
+    diag::init_log(attempt);
     diag::android_stage("Native entry");
     #[cfg(feature = "heap-probe")]
     heap_probe::start();
 
-    let files = launch_path("IW4L_ANDROID_FILES");
-    let media = launch_path("IW4L_ANDROID_MEDIA");
-    let config = launch_path("XDG_CONFIG_HOME");
-    let builtin = config.join("lan.iw4l-server");
+    let builtin = paths.config.join("lan.iw4l-server");
     if std::env::var_os("IW4L_COMMUNITY").as_deref() == Some(builtin.as_os_str())
         && let Err(error) = std::fs::write(&builtin, lan::descriptor())
     {
@@ -68,8 +62,8 @@ fn main() {
     }
 
     bootstrap::launch(
-        asset_transport::GamesRoot(media.join("mw2")),
-        files.join("iw4l-artifacts"),
+        asset_transport::GamesRoot(paths.media.join("mw2")),
+        paths.files.join("iw4l-artifacts"),
         bootstrap::LaunchMode::Menu,
         None,
         sim::HostCheats(true),
@@ -231,4 +225,13 @@ pub extern "system" fn Java_dev_iw4j_iw4l_GameActivity_nativeTypedDone(
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_dev_iw4j_iw4l_GameActivity_nativeBack(_env: Jni, _class: Jni) {
     touch::press_back();
+}
+
+// Java may request a return to setup while the owner thread is waiting for an event.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_iw4j_iw4l_GameActivity_nativeRequestShutdown(
+    _env: Jni,
+    _class: Jni,
+) {
+    bootstrap::request_android_shutdown();
 }

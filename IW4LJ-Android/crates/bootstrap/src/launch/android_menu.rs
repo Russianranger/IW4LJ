@@ -1,9 +1,31 @@
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 
 use bevy::render::error_handler::{RenderErrorHandler, RenderErrorPolicy};
 
+use bevy::winit::{EventLoopProxy, EventLoopProxyWrapper, WinitUserEvent};
+
 use super::*;
+
+// This process owns exactly one native game session. finish() can arrive while
+// plugins are still being built, before the winit proxy is available.
+static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
+static EVENT_LOOP: OnceLock<EventLoopProxy<WinitUserEvent>> = OnceLock::new();
+
+pub fn request_android_shutdown() {
+    SHUTDOWN_REQUESTED.store(true, Ordering::Release);
+    if let Some(proxy) = EVENT_LOOP.get() {
+        let _ = proxy.send_event(WinitUserEvent::WakeUp);
+    }
+}
+
+fn exit_if_requested(mut exit: MessageWriter<AppExit>) {
+    if SHUTDOWN_REQUESTED.swap(false, Ordering::AcqRel) {
+        diag::android_event("Finishing the engine on the winit thread");
+        exit.write(AppExit::Success);
+    }
+}
 
 #[derive(Resource)]
 struct PendingMenu(Mutex<Receiver<Result<PreparedMenu, String>>>);
@@ -21,6 +43,8 @@ pub(super) fn run(games: asset_transport::GamesRoot, artifacts: PathBuf, cheats:
     // the worker publishes the actual installed namespace inventory.
     let master = menu_master_intent(net::content_inventory(true, false, false, false));
     let mut app = menu_app(&config, cheats, master, None);
+    let proxy = app.world().resource::<EventLoopProxyWrapper>();
+    let _ = EVENT_LOOP.set(EventLoopProxy::clone(proxy));
     let artifacts = config.artifacts.clone();
     app.insert_resource(net::MasterLaunchIntent::disabled())
         .insert_resource(AppScreen::Loading)
@@ -37,6 +61,7 @@ pub(super) fn run(games: asset_transport::GamesRoot, artifacts: PathBuf, cheats:
                 }
             },
         )
+        .add_systems(First, exit_if_requested)
         .add_systems(Startup, move |mut commands: Commands| {
             diag::android_stage("First winit update; starting menu preparation");
             let preferred = games.0.clone();

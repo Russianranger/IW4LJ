@@ -58,6 +58,20 @@ final class RuntimeEnvironment {
         Os.setenv("IW4L_COMMUNITY", new File(config, "lan.iw4l-server").getPath(), false);
     }
 
+    static byte[] nativeSettings() throws IOException {
+        ByteArrayOutputStream result = new ByteArrayOutputStream();
+        for (String entry : Os.environ()) {
+            int equals = entry.indexOf('=');
+            if (equals <= 0) continue;
+            String key = entry.substring(0, equals);
+            if (key.equals("HOME") || key.equals("XDG_CONFIG_HOME") || key.matches("IW4L_[a-zA-Z0-9_]+")) {
+                result.write(entry.getBytes(StandardCharsets.UTF_8));
+                result.write(0);
+            }
+        }
+        return result.toByteArray();
+    }
+
     private static String text(File file) throws IOException {
         if (!file.exists()) return "";
         try (FileInputStream input = new FileInputStream(file);

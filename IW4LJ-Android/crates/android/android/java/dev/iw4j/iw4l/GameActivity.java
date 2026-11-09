@@ -46,6 +46,7 @@ public class GameActivity extends NativeActivity implements InputManager.InputDe
     private android.widget.TextView loading;
     private android.widget.PopupWindow loadingWindow;
     private volatile boolean menuPresented;
+    private boolean nativeAttached;
     private final java.util.concurrent.ScheduledExecutorService statusWorker =
         java.util.concurrent.Executors.newSingleThreadScheduledExecutor();
 
@@ -60,6 +61,7 @@ public class GameActivity extends NativeActivity implements InputManager.InputDe
         }
         StartupReport.event(attempt, "NativeActivity.onCreate begin");
         super.onCreate(savedInstanceState);
+        nativeAttached = true;
         StartupReport.event(attempt, "NativeActivity.onCreate acknowledged");
         // Input goes through the view hierarchy, to the dispatch methods below.
         getWindow().takeInputQueue(null);
@@ -156,6 +158,12 @@ public class GameActivity extends NativeActivity implements InputManager.InputDe
     private WifiManager.MulticastLock broadcastLock;
 
     @Override
+    public void finish() {
+        if (nativeAttached) nativeRequestShutdown();
+        super.finish();
+    }
+
+    @Override
     protected void onDestroy() {
         StartupReport.event(attempt, "NativeActivity.onDestroy begin");
         statusWorker.shutdownNow();
@@ -165,7 +173,17 @@ public class GameActivity extends NativeActivity implements InputManager.InputDe
             broadcastLock.release();
         }
         getSystemService(InputManager.class).unregisterInputDeviceListener(this);
-        super.onDestroy();
+        if (nativeAttached) nativeRequestShutdown();
+        // NativeActivity waits here for android_main to return. Pinned winit
+        // cannot dispatch a new Bevy update after its surface is suspended.
+        if ((getPackageName() + ":engine").equals(android.app.Application.getProcessName())) {
+            EngineTeardown.await(super::onDestroy, () -> {
+                StartupReport.event(attempt, "Timed out waiting for native destruction; retiring private engine process");
+                android.os.Process.killProcess(android.os.Process.myPid());
+            }, 2500);
+        } else {
+            super.onDestroy();
+        }
         StartupReport.event(attempt, "NativeActivity.onDestroy acknowledged");
     }
 
@@ -649,6 +667,10 @@ public class GameActivity extends NativeActivity implements InputManager.InputDe
         padStates.remove(deviceId);
         nativePadRemoved(deviceId);
     }
+
+    static native int nativeConfigureEnvironment(byte[] environment);
+
+    private static native void nativeRequestShutdown();
 
     private static native void nativeTouch(int id, int phase, float x, float y);
 

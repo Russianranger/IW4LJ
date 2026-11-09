@@ -140,8 +140,13 @@ public final class EngineLoaderActivity extends Activity {
         StartupReport.event(dir, "MW2 search order: " + paths);
         StartupReport.event(dir, "System.loadLibrary(iw4l_android)");
         System.loadLibrary("iw4l_android");
+        StartupReport.event(dir, "ARM64 library loaded; transferring startup configuration through JNI");
+        if (GameActivity.nativeConfigureEnvironment(RuntimeEnvironment.nativeSettings()) != 1
+                || !StartupReport.present(dir, "jni-environment.txt")) {
+            throw new IOException("ARM64 runtime did not acknowledge startup configuration");
+        }
+        StartupReport.event(dir, "ARM64 startup configuration acknowledged");
         loadedRoots = roots;
-        StartupReport.event(dir, "ARM64 library loaded");
         return loadedRoots;
     }
 }

@@ -47,7 +47,35 @@ jobs:
         run: |
           cd "$RUNNER_TEMP/thor"
           tag=thor-test-${SOURCE_SHA:0:12}
+          endpoint="repos/$GITHUB_REPOSITORY/releases/tags/$tag"
+          if gh api "$endpoint" > "$RUNNER_TEMP/existing-release.json" 2>/dev/null; then
+            jq -e --arg tag "$tag" --arg sha "$SOURCE_SHA" \
+              '.tag_name == $tag and .target_commitish == $sha and .prerelease and (.draft | not)' \
+              "$RUNNER_TEMP/existing-release.json" >/dev/null
+            for file in IW4LJ-Thor.apk libiw4l_android.so.debug.gz SHA256SUMS package-report.txt; do
+              digest=sha256:$(sha256sum "$file" | cut -d' ' -f1)
+              jq -e --arg name "$file" --arg digest "$digest" \
+                'any(.assets[]; .name == $name and .digest == $digest)' "$RUNNER_TEMP/existing-release.json" >/dev/null
+            done
+            exit 0
+          fi
           gh release create "$tag" --repo "$GITHUB_REPOSITORY" --target "$SOURCE_SHA" --prerelease \
             --title "IW4LJ Thor startup test — ${SOURCE_SHA:0:12}" \
             --notes 'Side-by-side ARM64 diagnostic candidate for Android 12+. Choose IW4LJ-Thor.apk to install. Physical Thor testing with your own MW2 multiplayer files is required.' \
             IW4LJ-Thor.apk libiw4l_android.so.debug.gz SHA256SUMS package-report.txt
+      - name: Mark the specified earlier prerelease as superseded
+        run: |
+          receipt=.github/thor-release.json
+          older=$(jq -er '.supersedes // "" | strings' "$receipt")
+          [[ -n "$older" ]] || exit 0
+          tag=thor-test-${SOURCE_SHA:0:12}
+          [[ "$older" =~ ^thor-test-[a-f0-9]{12}$ && "$older" != "$tag" ]]
+          api="repos/$GITHUB_REPOSITORY/releases"
+          gh api "$api/tags/$older" > "$RUNNER_TEMP/older-release.json"
+          jq -e --arg tag "$older" '.tag_name == $tag and .prerelease and (.draft | not)' "$RUNNER_TEMP/older-release.json" >/dev/null
+          id=$(jq -er '.id | numbers' "$RUNNER_TEMP/older-release.json")
+          url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/tag/$tag"
+          notice="Superseded by [the newer Thor test APK]($url)."
+          jq --arg notice "$notice" '{ body: ((.body // "") | if startswith($notice) then . else $notice + "\n\n" + . end) }' \
+            "$RUNNER_TEMP/older-release.json" > "$RUNNER_TEMP/updated-notes.json"
+          gh api --method PATCH "$api/$id" --input "$RUNNER_TEMP/updated-notes.json" >/dev/null

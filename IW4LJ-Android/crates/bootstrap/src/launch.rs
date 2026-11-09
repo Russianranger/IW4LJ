@@ -625,6 +625,8 @@ fn run_menu(
 
 #[cfg(target_os = "android")]
 mod android_menu;
+#[cfg(target_os = "android")]
+pub use android_menu::request_android_shutdown;
 
 fn run_play(
     games: asset_transport::GamesRoot,

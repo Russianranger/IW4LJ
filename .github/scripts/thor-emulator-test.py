@@ -78,6 +78,7 @@ def launch():
     action = ["-a", "android.intent.action.MAIN", "-c", "android.intent.category.LAUNCHER"]
     exported = shell("cmd", "package", "query-activities", "--components", "--user", "current",
                      *action, "-p", PKG)
+    (OUT / "launcher-query.txt").write_text(exported + "\n")
     component = f"{PKG}/dev.iw4j.iw4l.LaunchActivity"
     assert component in exported.split(), f"Launcher component missing from package query: {exported}"
     result = shell("am", "start", "-W", *action, "-f", "0x10200000", "-n", component)
@@ -131,6 +132,14 @@ def presented(attempt):
     message = note(attempt, "ready.txt")
     if "Presented primary surface frame with IW4 main menu text" in message:
         return message
+    pid = note(attempt, "engine.pid")
+    if pid.isdecimal():
+        log = note(attempt, "logcat.txt") or adb(
+            "logcat", "-d", "--pid", pid, "-t", "1200", "-v", "brief", check=False)
+        cause = re.search(r"(?im)^.*(?:panicked at|fatal signal [0-9]+|fatal exception:).*(?:\n[^\n]+)?", log)
+        if cause:
+            (OUT / f"synthetic-{pid}-logcat.txt").write_text(log + "\n")
+            raise RuntimeError(f"engine pid {pid}: {cause.group(0)}")
     return None
 
 
@@ -175,6 +184,7 @@ def run():
     missing = new_attempt(loader, "Start / retry")
     visible("expected zone/<language>/common_mp.ff")
     assert "ARM64 library loaded" in note(missing, "java.log")
+    assert "ARM64 startup configuration acknowledged" in note(missing, "jni-environment.txt")
     assert not note(missing, "ready.txt")
     screenshot("missing-data")
     shell("am", "force-stop", PKG)
@@ -225,9 +235,11 @@ if __name__ == "__main__":
     try:
         run()
     except Exception:
-        screenshot("failed-step")
         try:
+            (OUT / "failed-package.txt").write_text(shell("dumpsys", "package", PKG, check=False))
+            (OUT / "failed-windows.txt").write_text(shell("dumpsys", "window", "windows", check=False))
+            screenshot("failed-step")
             (OUT / "failed-ui.xml").write_text("\n".join(ET.tostring(n, encoding="unicode") for n in ui()[:1]))
-        except (OSError, subprocess.SubprocessError):
+        except (OSError, subprocess.SubprocessError, ET.ParseError):
             pass
         raise
