@@ -37,6 +37,7 @@ jobs:
         run: |
           cd "$RUNNER_TEMP/thor"
           sha256sum -c SHA256SUMS-unsigned
+          test "$(unzip -p IW4LJ-Thor-aligned-unsigned.apk assets/iw4l-source.txt)" = "$SOURCE_SHA"
           python3 "$GITHUB_WORKSPACE/IW4LJ-Android/crates/android/offline-signature.py" \
             --apksigner "$ANDROID_HOME/build-tools/35.0.0/apksigner" apply \
             IW4LJ-Thor-aligned-unsigned.apk "$GITHUB_WORKSPACE/.github/thor-release.json" IW4LJ-Thor.apk

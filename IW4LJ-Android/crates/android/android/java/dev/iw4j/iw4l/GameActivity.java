@@ -514,6 +514,7 @@ public class GameActivity extends NativeActivity implements InputManager.InputDe
     @Override
     public boolean dispatchGenericMotionEvent(MotionEvent event) {
         if (isPad(event.getSource()) && event.getActionMasked() == MotionEvent.ACTION_MOVE) {
+            if (!menuPresented) return true;
             PadLayout layout = layoutOf(event.getDevice());
             float rx = axis(event, layout.rightX);
             float ry = axis(event, layout.rightY);
@@ -606,6 +607,7 @@ public class GameActivity extends NativeActivity implements InputManager.InputDe
                     && code >= KeyEvent.KEYCODE_DPAD_UP
                     && code <= KeyEvent.KEYCODE_DPAD_RIGHT);
         if (padKey) {
+            if (!menuPresented) return true;
             if (event.getRepeatCount() == 0) {
                 if (down) {
                     Log.d("IW4LPad", "button " + KeyEvent.keyCodeToString(code));

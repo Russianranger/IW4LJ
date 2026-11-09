@@ -36,6 +36,8 @@ fn drain_pending_console_lines(
 ) {
     if let Some(startup) = startup.as_mut()
         && !startup.lines.is_empty()
+        // A saved map command may leave MainMenu before its first Android frame.
+        && (!cfg!(target_os = "android") || diag::android_menu_presented())
         && screen
             .as_ref()
             .is_some_and(|s| matches!(**s, AppScreen::MainMenu))

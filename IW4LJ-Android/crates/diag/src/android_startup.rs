@@ -6,6 +6,7 @@ use std::{
     time::Instant,
 };
 
+static MENU_PRESENTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static WRITER: Mutex<()> = Mutex::new(());
 static START: OnceLock<Instant> = OnceLock::new();
 
@@ -18,16 +19,22 @@ pub fn android_failure(message: &str) {
 }
 
 pub fn android_ready(message: &str) {
-    record(Some("ready.txt"), message);
+    if record(Some("ready.txt"), message) {
+        MENU_PRESENTED.store(true, std::sync::atomic::Ordering::Release);
+    }
+}
+
+pub fn android_menu_presented() -> bool {
+    MENU_PRESENTED.load(std::sync::atomic::Ordering::Acquire)
 }
 
 pub fn android_event(message: &str) {
     record(None, message);
 }
 
-fn record(name: Option<&str>, message: &str) {
+fn record(name: Option<&str>, message: &str) -> bool {
     let Some(dir) = std::env::var_os("IW4L_STARTUP_DIR").map(PathBuf::from) else {
-        return;
+        return false;
     };
     let _guard = WRITER
         .lock()
@@ -39,24 +46,26 @@ fn record(name: Option<&str>, message: &str) {
     {
         line.push_str(&format!("\nLast engine stage: {stage}"));
     }
-    let result = (|| -> std::io::Result<()> {
+    let result = (|| -> std::io::Result<bool> {
         let mut log = OpenOptions::new()
             .append(true)
             .create(true)
             .open(dir.join("native.log"))?;
         writeln!(log, "{line}")?;
-        let Some(name) = name else { return Ok(()) };
+        let Some(name) = name else { return Ok(true) };
         // Keep the initiating failure if cleanup or another worker fails afterward.
         if name == "failure.txt" && dir.join(name).is_file()
             || name == "ready.txt" && dir.join("failure.txt").is_file()
         {
-            return Ok(());
+            return Ok(false);
         }
         let temp = dir.join(format!("{name}.new"));
         fs::write(&temp, &line)?;
-        fs::rename(temp, dir.join(name))
+        fs::rename(temp, dir.join(name))?;
+        Ok(true)
     })();
-    if let Err(error) = result {
+    result.unwrap_or_else(|error| {
         eprintln!("IW4 startup report {}: {error}; {line}", dir.display());
-    }
+        false
+    })
 }

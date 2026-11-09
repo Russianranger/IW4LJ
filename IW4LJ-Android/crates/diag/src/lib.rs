@@ -1,6 +1,8 @@
 mod alloc_count;
 mod android_startup;
-pub use android_startup::{android_event, android_failure, android_ready, android_stage};
+pub use android_startup::{
+    android_event, android_failure, android_menu_presented, android_ready, android_stage,
+};
 pub mod exit;
 pub mod gap;
 pub mod wgsl_dump;

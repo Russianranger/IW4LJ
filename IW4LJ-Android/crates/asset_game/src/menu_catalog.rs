@@ -344,6 +344,7 @@ pub struct MenuCatalog {
     pub rawfiles: BTreeMap<String, String>,
 
     pub zone_images: BTreeMap<String, ZoneUiImage>,
+    pub(crate) zone_image_errors: BTreeMap<String, String>,
 
     pub material_state_bits: BTreeMap<String, asset_iw4::ColorPassAgreement<[u32; 2]>>,
 
@@ -514,6 +515,7 @@ impl MenuCatalog {
         for (name, image) in other.material_images {
             self.material_images.insert(name, image);
         }
+        self.zone_image_errors.extend(other.zone_image_errors);
         for (name, image) in other.zone_images {
             self.zone_images.insert(name, image);
         }
@@ -569,9 +571,10 @@ pub fn load_ui_menu_catalog(games: &GamesRoot) -> (MenuCatalog, Vec<String>) {
     };
     let mut report = vec![format!("menu asset root (IW4): {}", games.0.display())];
     let mut catalog = MenuCatalog::default();
+    let archive_image = |name: &str| asset_material::decode_ui_archive_image(&games.0, name);
     for zone in UI_MENU_ZONES {
         let result = find_zone_file(&games, &format!("iw4:{zone}"))
-            .and_then(|found| absorb_menu_zone(&mut catalog, &games.0, &found));
+            .and_then(|found| absorb_menu_zone(&mut catalog, &found, &archive_image));
         report.push(result.unwrap_or_else(|error| format!("menu catalog gap: {zone}: {error}")));
     }
     report.push(format!(
@@ -582,12 +585,14 @@ pub fn load_ui_menu_catalog(games: &GamesRoot) -> (MenuCatalog, Vec<String>) {
     (catalog, report)
 }
 
+type ArchiveImageLoader<'a> = dyn Fn(&str) -> Result<Option<(u32, u32, Vec<u8>)>, String> + 'a;
+
 pub(crate) fn absorb_menu_zone(
     catalog: &mut MenuCatalog,
-    root: &Path,
     found: &asset_transport::ZoneFile,
+    archive_image: &ArchiveImageLoader<'_>,
 ) -> Result<String, String> {
-    let part = load_menu_catalog_with_iwd(&found.path, Some(root))
+    let mut part = load_menu_catalog_with_iwd(&found.path, Some(archive_image))
         .map_err(|error| format!("{}: {error}", found.path.display()))?;
     let summary = format!(
         "menu catalog: {} {} menus ({} lists, {} assets, {} font headers, {} fonts; main={}, main_text={}) from {}",
@@ -601,6 +606,9 @@ pub(crate) fn absorb_menu_zone(
         part.get("main_text").is_some(),
         found.path.display()
     );
+    for error in part.zone_image_errors.values_mut() {
+        *error = format!("{}: {error}", found.path.display());
+    }
     catalog.absorb(part);
     Ok(summary)
 }
@@ -609,7 +617,10 @@ pub fn load_menu_catalog(path: &Path) -> Result<MenuCatalog, String> {
     load_menu_catalog_with_iwd(path, None)
 }
 
-fn load_menu_catalog_with_iwd(path: &Path, games: Option<&Path>) -> Result<MenuCatalog, String> {
+fn load_menu_catalog_with_iwd(
+    path: &Path,
+    archive_image: Option<&ArchiveImageLoader<'_>>,
+) -> Result<MenuCatalog, String> {
     let image = open_zone(path).map_err(|e| e.to_string())?;
     let header = image.header().map_err(|e| e.to_string())?;
     let mut memory = ZoneMemory::for_header(&header);
@@ -634,7 +645,7 @@ fn load_menu_catalog_with_iwd(path: &Path, games: Option<&Path>) -> Result<MenuC
         Some((index, ty, slot)) => format!("asset #{index} {} at {slot:?}: {error:?}", ty.name()),
         None => format!("asset table: {error:?}"),
     })?;
-    Ok(sink.finish_and_take(games))
+    Ok(sink.finish_and_take(archive_image))
 }
 
 #[derive(Clone, Copy)]
@@ -947,7 +958,7 @@ impl MenuSink {
         }
     }
 
-    fn finish_ui_images(&mut self, games: Option<&Path>) {
+    fn finish_ui_images(&mut self, archive_image: Option<&ArchiveImageLoader<'_>>) {
         let mut materials = Vec::new();
         for font in self.catalog.fonts.values() {
             if !font.material.is_empty() {
@@ -1026,16 +1037,16 @@ impl MenuSink {
         materials.sort_unstable();
         materials.dedup();
         for material in materials {
-            self.install_ui_image(&material, games);
+            self.install_ui_image(&material, archive_image);
         }
     }
 
-    fn finish_and_take(mut self, games: Option<&Path>) -> MenuCatalog {
-        self.finish_ui_images(games);
+    fn finish_and_take(mut self, archive_image: Option<&ArchiveImageLoader<'_>>) -> MenuCatalog {
+        self.finish_ui_images(archive_image);
         self.catalog
     }
 
-    fn install_ui_image(&mut self, material: &str, games: Option<&Path>) {
+    fn install_ui_image(&mut self, material: &str, archive_image: Option<&ArchiveImageLoader<'_>>) {
         let bare = AssetRef::bare_name(material);
         if bare.is_empty() {
             return;
@@ -1055,7 +1066,7 @@ impl MenuSink {
             return;
         };
         let decoded = if image.payload.is_empty() {
-            let Some(root) = games else {
+            let Some(decode) = archive_image else {
                 diag::info!(
                     Zone,
                     "menu catalog: material `{bare}` image `{}` is an IWD stub; no games root",
@@ -1063,7 +1074,7 @@ impl MenuSink {
                 );
                 return;
             };
-            match asset_material::decode_ui_archive_image(root, &image.name) {
+            match decode(&image.name) {
                 Ok(Some(rgba)) => Some((rgba, "iwd")),
                 Ok(None) => {
                     diag::warn!(
@@ -1091,11 +1102,9 @@ impl MenuSink {
             ) {
                 Ok(rgba) => Some((rgba, "zone")),
                 Err(error) => {
-                    diag::warn!(
-                        Zone,
-                        "menu catalog: decode font atlas `{bare}` / `{}`: {error}",
-                        image.name
-                    );
+                    let error = format!("decoding embedded {bare} / {}: {error}", image.name);
+                    diag::warn!(Zone, "menu catalog: {error}");
+                    self.catalog.zone_image_errors.insert(key.clone(), error);
                     None
                 }
             }

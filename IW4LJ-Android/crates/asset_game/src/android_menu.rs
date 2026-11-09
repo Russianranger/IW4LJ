@@ -1,23 +1,19 @@
 //! Select one usable Android installation before publishing any runtime resources.
 use std::path::{Path, PathBuf};
 
-use crate::menu_catalog::{MenuCatalog, UI_MENU_ZONES, absorb_menu_zone};
+use crate::menu_catalog::{MenuCatalog, UI_MENU_ZONES, ZoneUiImage, absorb_menu_zone};
+use asset_core::{AssetNamespace, AssetRef};
 use asset_transport::{GamesRoot, IwdIndex, discover::find_iw4_zone_in_install};
 
 pub fn android_menu_roots(preferred: &Path) -> Vec<PathBuf> {
-    let mut roots = vec![preferred.to_owned()];
-    for name in [
-        "IW4L_ANDROID_MEDIA",
-        "IW4L_ANDROID_FILES",
-        "IW4L_ANDROID_LEGACY_MEDIA",
-    ] {
-        if let Some(base) = std::env::var_os(name).filter(|path| !path.is_empty()) {
-            let candidate = PathBuf::from(base).join("mw2");
-            if !roots.contains(&candidate) {
-                roots.push(candidate);
-            }
+    if let Ok(encoded) = std::env::var("IW4L_ANDROID_GAME_ROOTS") {
+        match serde_json::from_str::<Vec<PathBuf>>(&encoded) {
+            Ok(roots) if !roots.is_empty() => return roots,
+            Ok(_) => diag::warn!(Launch, "Android supplied no MW2 search paths"),
+            Err(error) => diag::warn!(Launch, "Invalid Android MW2 search paths: {error}"),
         }
     }
+    let mut roots = vec![preferred.to_owned()];
     if let Some(configured) = std::env::var_os("IW4L_GAMES").filter(|path| !path.is_empty()) {
         let candidate = PathBuf::from(configured);
         if !roots.contains(&candidate) {
@@ -79,10 +75,15 @@ fn read_menu(root: &Path) -> Result<(MenuCatalog, Vec<String>), String> {
     let common = find_iw4_zone_in_install(root, "common_mp")?;
     let main = root.join("main");
     diag::android_stage(&format!("Indexing MW2 archives in {}", main.display()));
-    if IwdIndex::open(&main)?.archive_count() == 0 {
+    let archives = IwdIndex::open(&main)?;
+    if archives.archive_count() == 0 {
         return Err(format!("No readable .iwd archives in {}", main.display()));
     }
 
+    // Resolve IWD stubs against this candidate's index. A donor folder in
+    // settings must not satisfy another installation's font check.
+    let archive_image =
+        |name: &str| asset_material::decode_ui_image_from_index(archives.clone(), name);
     let mut catalog = MenuCatalog::default();
     let mut lines = Vec::new();
     for &zone in UI_MENU_ZONES {
@@ -93,7 +94,7 @@ fn read_menu(root: &Path) -> Result<(MenuCatalog, Vec<String>), String> {
         };
         let result = file.and_then(|found| {
             diag::android_stage(&format!("Decoding {}", found.path.display()));
-            absorb_menu_zone(&mut catalog, root, &found)
+            absorb_menu_zone(&mut catalog, &found, &archive_image)
         });
         match result {
             Ok(summary) => lines.push(summary),
@@ -112,5 +113,75 @@ fn read_menu(root: &Path) -> Result<(MenuCatalog, Vec<String>), String> {
             lines.join("\n")
         ));
     }
+    diag::android_stage(&format!("Checking menu label font in {}", root.display()));
+    prepare_label_font(&mut catalog, &main, &archive_image)
+        .map_err(|error| format!("{error}\n{}", lines.join("\n")))?;
     Ok((catalog, lines))
+}
+
+fn prepare_label_font(
+    catalog: &mut MenuCatalog,
+    main: &Path,
+    archive_image: impl Fn(&str) -> Result<Option<(u32, u32, Vec<u8>)>, String>,
+) -> Result<(), String> {
+    // The production dashboard rows use font enum 3 (fonts/smallfont).
+    let font = catalog.font("fonts/smallfont").filter(|font| {
+        font.pixel_height > 0
+            && !font.material.is_empty()
+            && b"CREATE".iter().all(|letter| {
+                font.glyph(u32::from(*letter))
+                    .is_some_and(|g| g.pixel_width > 0 && g.pixel_height > 0)
+            })
+    }).ok_or("MW2 menu font fonts/smallfont has no usable glyphs or material; restore the multiplayer FastFiles.")?;
+    let material = AssetRef::bare_name(&font.material).to_ascii_lowercase();
+    if let Some(state) = catalog.material_state_bits.get(&material) {
+        let words = state.agreed().ok_or_else(|| {
+            format!("fonts/smallfont material {material}: unusable render state {state:?}")
+        })?;
+        let compiled = asset_material::compile_material_state(AssetNamespace::Iw4, words);
+        if let Some(fields) = compiled.unsupported_host_fields() {
+            return Err(format!(
+                "fonts/smallfont material {material}: unsupported render state {fields:?}"
+            ));
+        }
+    }
+    if catalog.zone_image(&material).is_some() {
+        return Ok(());
+    }
+    let image = catalog
+        .material_image(&material)
+        .unwrap_or(&material)
+        .to_owned();
+    // Font and material definitions can be in different menu FastFiles. Reuse
+    // a decoded binding before consulting the candidate's archives.
+    let atlas = if let Some(atlas) = catalog.zone_image(&image) {
+        let mut atlas = atlas.clone();
+        atlas.material = material.clone();
+        atlas
+    } else {
+        let context = format!(
+            "fonts/smallfont material {material}: images/{image}.iwi in {}",
+            main.display()
+        );
+        let (width, height, rgba) = archive_image(&image)
+            .map_err(|error| format!("{context}: {error}"))?
+            .ok_or_else(|| {
+                let cause = catalog
+                    .zone_image_errors
+                    .get(&material)
+                    .map(String::as_str)
+                    .unwrap_or("no decoded atlas in the menu FastFiles");
+                format!("{context}: image missing from IWD archives; {cause}")
+            })?;
+        ZoneUiImage {
+            material: material.clone(),
+            image,
+            width,
+            height,
+            rgba: rgba.into(),
+            source: "iwd",
+        }
+    };
+    catalog.zone_images.insert(material, atlas);
+    Ok(())
 }

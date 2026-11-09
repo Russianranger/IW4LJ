@@ -176,15 +176,23 @@ def run():
     visible("expected zone/<language>/common_mp.ff")
     export_reports({f"{missing}/failure.txt": "common_mp.ff", f"{loader}/java-error.txt": "UnsatisfiedLinkError"})
 
-    # An incomplete media root must lose to a decodable installation under files/mw2.
+    # Both roots have valid IW4 menu records and readable archives. The preferred
+    # one lacks only the font atlas; its failure must identify the missing image.
     preferred = f"/sdcard/Android/media/{PKG}/mw2"
     alternate = f"/sdcard/Android/data/{PKG}/files/mw2"
-    shell("mkdir", "-p", preferred + "/zone", alternate)
+    shell("mkdir", "-p", preferred + "/main", alternate)
+    adb("push", TEMP / "mw2" / "zone", preferred)
+    incomplete = TEMP / "no-menu-font.iwd"
+    with ZipFile(incomplete, "w") as archive:
+        archive.writestr("placeholder.txt", "synthetic archive lacking a menu font")
+    adb("push", incomplete, preferred + "/main/fixture.iwd")
     adb("push", str(TEMP / "mw2") + "/.", alternate)
     menu = new_attempt(missing, "Start / retry")
     wait("synthetic menu submitted and presented", lambda: presented(menu), timeout=240)
     log = note(menu, "native.log")
-    assert "First winit update" in log and "Selected MW2 root" in log and f"{PKG}/files/mw2" in log
+    assert "First winit update" in log and "images/qa_glyphs.iwi" in log
+    alternate_path = shell("readlink", "-f", alternate)
+    assert f"Selected MW2 root {alternate_path}" in log
     screenshot("synthetic-menu")
     pid = shell("pidof", PKG + ":engine")
     shell("input", "keyevent", "KEYCODE_HOME")

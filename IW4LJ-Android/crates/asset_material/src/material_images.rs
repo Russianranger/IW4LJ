@@ -821,8 +821,26 @@ pub fn decode_ui_image_from_main(
     main: &Path,
     image_name: &str,
 ) -> Result<Option<(u32, u32, Vec<u8>)>, String> {
+    let archives = asset_transport::IwdIndex::open(main)?;
+    match decode_ui_image_from_index(archives, image_name) {
+        Err(error) => {
+            diag::warn!(
+                Zone,
+                "ui-image: decode {image_name} from {}: {error}",
+                main.display()
+            );
+            Ok(None)
+        }
+        result => result,
+    }
+}
+
+pub fn decode_ui_image_from_index(
+    archives: Arc<asset_transport::IwdIndex>,
+    image_name: &str,
+) -> Result<Option<(u32, u32, Vec<u8>)>, String> {
     let name = crate::AssetRef::bare_name(image_name);
-    let index = IwdIndex::open(main)?;
+    let index = IwdIndex::from_owned(archives);
     let fallback = name
         .strip_prefix("preview_")
         .map(|map| format!("loadscreen_{map}"))
@@ -831,20 +849,15 @@ pub fn decode_ui_image_from_main(
                 .and_then(|map| map.strip_suffix("_big"))
                 .map(|map| format!("loadscreen_mp_{map}"))
         });
+    let mut first_error = None;
     for candidate in std::iter::once(name).chain(fallback.as_deref()) {
         match index.decode(candidate).map(expand_top_level) {
             Some(Ok(image)) => return Ok(Some(image)),
-            Some(Err(error)) => {
-                diag::warn!(
-                    Zone,
-                    "ui-image: decode {candidate} from {}: {error}",
-                    main.display()
-                );
-            }
-            None => {}
+            Some(Err(error)) if first_error.is_none() => first_error = Some(error),
+            _ => {}
         }
     }
-    Ok(None)
+    first_error.map_or(Ok(None), Err)
 }
 
 fn ui_decode_mains(games_root: &Path) -> Vec<PathBuf> {

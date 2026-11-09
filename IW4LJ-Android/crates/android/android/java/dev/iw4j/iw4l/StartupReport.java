@@ -37,7 +37,8 @@ final class StartupReport {
     private static final int KIB = 1024;
 
     static File media(Context context) {
-        for (File dir : context.getExternalMediaDirs()) if (dir != null) return dir;
+        File[] volumes = context.getExternalMediaDirs();
+        if (volumes.length > 0 && volumes[0] != null) return volumes[0];
         File external = context.getExternalFilesDir(null);
         return external != null ? external : context.getFilesDir();
     }
@@ -169,8 +170,9 @@ final class StartupReport {
 
     static String summary(Context context, File dir) {
         StringBuilder out = new StringBuilder();
-        out.append("Copy your owned MW2 multiplayer zone/ and main/ folders into\n")
-            .append(new File(media(context), "mw2")).append("\n\n");
+        out.append("Default MW2 multiplayer folder for zone/ and main/:\n")
+            .append(new File(media(context), "mw2"))
+            .append("\nStart game also checks accessible installations on mounted SD cards.\n\n");
         if (dir == null) {
             out.append(identity(context)).append("\nPress Start game to check the files and open the MW2 menu.\n");
         } else {
