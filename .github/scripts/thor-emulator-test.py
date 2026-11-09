@@ -73,8 +73,14 @@ def screenshot(name):
 
 
 def launch():
-    result = shell("am", "start", "-W", "-a", "android.intent.action.MAIN", "-c",
-                   "android.intent.category.LAUNCHER", "-f", "0x10200000", "-p", PKG)
+    # LauncherApps enumerates MAIN/LAUNCHER then sends an explicit component.
+    # A package-scoped implicit am start uses default-only intent resolution.
+    action = ["-a", "android.intent.action.MAIN", "-c", "android.intent.category.LAUNCHER"]
+    exported = shell("cmd", "package", "query-activities", "--components", "--user", "current",
+                     *action, "-p", PKG)
+    component = f"{PKG}/dev.iw4j.iw4l.LaunchActivity"
+    assert component in exported.split(), f"Launcher component missing from package query: {exported}"
+    result = shell("am", "start", "-W", *action, "-f", "0x10200000", "-n", component)
     if "Error" in result:
         raise RuntimeError(result)
 
@@ -216,4 +222,12 @@ def run():
 
 
 if __name__ == "__main__":
-    run()
+    try:
+        run()
+    except Exception:
+        screenshot("failed-step")
+        try:
+            (OUT / "failed-ui.xml").write_text("\n".join(ET.tostring(n, encoding="unicode") for n in ui()[:1]))
+        except (OSError, subprocess.SubprocessError):
+            pass
+        raise
