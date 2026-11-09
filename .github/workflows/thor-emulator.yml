@@ -44,7 +44,8 @@ jobs:
       - name: Prepare disposable emulator-signed APKs
         run: |
           sdkmanager=$(find "$ANDROID_HOME/cmdline-tools" -type f -name sdkmanager | sort -V | tail -1)
-          "$sdkmanager" 'build-tools;35.0.0' 'platform-tools' 'emulator' "system-images;android-$QA_API;google_apis;x86_64"
+          "$sdkmanager" 'build-tools;35.0.0' 'platform-tools' 'emulator' "system-images;android-$QA_API;google_apis;x86_64" \
+            < <(printf 'y\n%.0s' {1..12})
           "$sdkmanager" --list_installed > "$QA_OUT/sdk-packages.txt"
           cp "$ANDROID_HOME/system-images/android-$QA_API/google_apis/x86_64/source.properties" "$QA_OUT/system-image.properties"
           bt="$ANDROID_HOME/build-tools/35.0.0"
@@ -94,6 +95,10 @@ jobs:
         run: |
           mkdir -p "$QA_OUT"
           adb="$ANDROID_HOME/platform-tools/adb"
+          if [[ "$(timeout 5 "$adb" -s emulator-5554 get-state 2>/dev/null || true)" != device ]]; then
+            echo "No attached emulator. SDK package and emulator boot records remain available."
+            exit 0
+          fi
           "$adb" -s emulator-5554 logcat -b all -d -t 8000 > "$QA_OUT/logcat.txt" 2>&1 || true
           "$adb" -s emulator-5554 shell dumpsys activity activities > "$QA_OUT/activities.txt" 2>&1 || true
           "$adb" -s emulator-5554 pull /data/user/0/dev.iw4j.iw4l.thor/files/startup "$QA_OUT/startup" || true
