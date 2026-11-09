@@ -1,0 +1,49 @@
+name: Thor Android build
+on:
+  workflow_dispatch:
+  push:
+    branches: ['repair/thor-startup']
+    paths:
+      - 'IW4LJ-Android/Cargo.*'
+      - 'IW4LJ-Android/crates/**'
+      - 'IW4LJ-Android/vendor/**'
+      - 'IW4LJ-Android/xtask/**'
+      - '.github/workflows/thor-android.yml'
+permissions:
+  contents: read
+
+jobs:
+  android:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Install toolchain
+        run: |
+          rustup toolchain install 1.99.1 --profile minimal --target aarch64-linux-android
+          echo RUSTUP_TOOLCHAIN=1.99.1 >> "$GITHUB_ENV"
+          sdkmanager 'platforms;android-34' 'build-tools;35.0.0' 'ndk;28.2.13676358'
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: IW4LJ-Android
+          key: android-r28c-api31-play
+      - name: Build and audit APK
+        env:
+          CARGO_BUILD_JOBS: 3
+        run: |
+          unset ANDROID_NDK_HOME
+          bash IW4LJ-Android/crates/android/package-linux.sh "$RUNNER_TEMP/thor-build"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: thor-build
+          path: ${{ runner.temp }}/thor-build/
+          if-no-files-found: error
+          compression-level: 1
+          retention-days: 30
