@@ -44,3 +44,11 @@ publication workflow fetches that run, verifies its branch, source, inputs,
 reconstructed APK hash and pinned signer, then attaches the signed APK,
 symbols, package audit and checksums to a prerelease at `thor-test-<short SHA>`.
 The keystore and password stay with the signer.
+
+If the source commit changes a workflow, keep a branch head or tag at that exact
+SHA when submitting the receipt. For a historical source, create
+`repair/thor-source-<short SHA>` at the recorded source SHA using an account
+authorized to modify workflows. Verify the ref before retrying publication.
+GitHub can return HTTP 403 when the Actions token creates a release at an
+unreferenced workflow-changing SHA. The published tag then retains the source.
+[GitHub's release permission rule](https://github.blog/changelog/2023-11-02-github-actions-enforcing-workflow-scope-when-creating-a-release/)

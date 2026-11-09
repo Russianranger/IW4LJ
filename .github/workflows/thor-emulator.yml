@@ -44,10 +44,26 @@ jobs:
       - name: Prepare disposable emulator-signed APKs
         run: |
           sdkmanager=$(find "$ANDROID_HOME/cmdline-tools" -type f -name sdkmanager | sort -V | tail -1)
-          "$sdkmanager" 'build-tools;35.0.0' 'platform-tools' 'emulator' "system-images;android-$QA_API;google_apis;x86_64" \
-            < <(printf 'y\n%.0s' {1..12})
+          packages=('build-tools;35.0.0' platform-tools emulator)
+          if [[ "$QA_API" == 33 ]]; then
+            image_dir=system-images/android-33/thor-qa-r15/x86_64
+            archive="$RUNNER_TEMP/x86_64-33_r15.zip"
+            url=https://dl.google.com/android/repository/sys-img/google_apis/x86_64-33_r15.zip
+            curl --fail --location --retry 2 --max-time 480 --output "$archive" "$url"
+            echo "52e09523c6cc3b507fa4d5b13890fe9c6d34480bf3843cce16f5f6503cb98284  $archive" | sha256sum -c -
+            mkdir -p "$ANDROID_HOME/${image_dir%/x86_64}"
+            unzip -q -o "$archive" -d "$ANDROID_HOME/${image_dir%/x86_64}"
+            printf '%s\n' "$url" "$(sha256sum "$archive")" > "$QA_OUT/pinned-system-image.txt"
+            rm "$archive"
+          else
+            image_dir="system-images/android-$QA_API/google_apis/x86_64"
+            packages+=("system-images;android-$QA_API;google_apis;x86_64")
+          fi
+          "$sdkmanager" "${packages[@]}" < <(printf 'y\n%.0s' {1..12})
           "$sdkmanager" --list_installed > "$QA_OUT/sdk-packages.txt"
-          cp "$ANDROID_HOME/system-images/android-$QA_API/google_apis/x86_64/source.properties" "$QA_OUT/system-image.properties"
+          test -f "$ANDROID_HOME/$image_dir/kernel-ranchu"
+          cp "$ANDROID_HOME/$image_dir/source.properties" "$QA_OUT/system-image.properties"
+          echo "QA_IMAGE_DIR=$image_dir" >> "$GITHUB_ENV"
           bt="$ANDROID_HOME/build-tools/35.0.0"
           apk="$RUNNER_TEMP/thor-build/IW4LJ-Thor-aligned-unsigned.apk"
           # This key signs only temporary emulator copies. No signed APK or key is uploaded.
@@ -63,27 +79,7 @@ jobs:
           "$bt/zipalign" -f -P 16 4 "$RUNNER_TEMP/missing-engine.apk" "$RUNNER_TEMP/missing-aligned.apk"
           "$bt/apksigner" sign --ks "$RUNNER_TEMP/qa.jks" --ks-pass pass:android --out "$RUNNER_TEMP/loader-test.apk" "$RUNNER_TEMP/missing-aligned.apk"
       - name: Boot accelerated Google APIs emulator
-        run: |
-          test -c /dev/kvm
-          sudo setfacl -m "u:$(id -un):rw" /dev/kvm
-          mgr=$(find "$ANDROID_HOME/cmdline-tools" -type f -name avdmanager | sort -V | tail -1)
-          printf 'no\n' | "$mgr" create avd --force -n iw4l_qa -k "system-images;android-$QA_API;google_apis;x86_64" -d pixel_2
-          "$ANDROID_HOME/emulator/emulator" -avd iw4l_qa -port 5554 -accel on \
-            -gpu swiftshader -feature Vulkan -no-window -no-snapshot -no-audio \
-            -no-boot-anim -memory 4096 -cores 2 >"$QA_OUT/emulator.log" 2>&1 </dev/null &
-          export ANDROID_SERIAL=emulator-5554
-          export PATH="$ANDROID_HOME/platform-tools:$PATH"
-          timeout 480 sh -c 'until [ "$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d "\r")" = 1 ]; do sleep 3; done'
-          adb root
-          adb wait-for-device
-          adb shell getprop > "$QA_OUT/properties.txt"
-          adb shell input keyevent KEYCODE_WAKEUP
-          adb shell wm dismiss-keyguard
-          adb shell settings put global window_animation_scale 0
-          adb shell settings put global transition_animation_scale 0
-          adb shell settings put global animator_duration_scale 0
-          echo ANDROID_SERIAL=emulator-5554 >> "$GITHUB_ENV"
-          echo "$ANDROID_HOME/platform-tools" >> "$GITHUB_PATH"
+        run: bash .github/scripts/thor-emulator-boot.sh
       - name: Exercise launcher, real ARM64 loader, diagnostics and synthetic menu presentation
         timeout-minutes: 18
         run: |
