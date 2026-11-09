@@ -1,4 +1,4 @@
-"""Smoke test the public launcher and private ARM64 engine on a disposable API 33 AVD."""
+"""Smoke test the public launcher and private ARM64 engine on disposable AVDs."""
 import os
 from pathlib import Path
 import re
@@ -96,7 +96,7 @@ def new_attempt(previous, title):
     return wait("new attempt persisted", changed)
 
 
-def export_reports(loader, missing):
+def export_reports(expected):
     tap("Export ZIP")
     # A fresh DocumentsUI uses the device Downloads folder. Preserve the suggested name.
     tap("Save")
@@ -107,8 +107,8 @@ def export_reports(loader, missing):
                 adb("pull", path, OUT / "setup-export.zip")
                 try:
                     with ZipFile(OUT / "setup-export.zip") as saved:
-                        assert "common_mp.ff" in saved.read(f"{missing}/failure.txt").decode()
-                        assert "UnsatisfiedLinkError" in saved.read(f"{loader}/java-error.txt").decode()
+                        for member, content in expected.items():
+                            assert content in saved.read(member).decode()
                         assert "summary.txt" in saved.namelist()
                         return saved.testzip() is None
                 except (OSError, KeyError, BadZipFile):
@@ -130,12 +130,11 @@ def presented(attempt):
 
 def run():
     assert shell("getprop", "ro.kernel.qemu") == "1", "This test only runs on an emulator"
-    assert shell("getprop", "ro.build.version.sdk") == "33"
+    api = os.environ["QA_API"]
+    assert shell("getprop", "ro.build.version.sdk") == api
     abis = shell("getprop", "ro.product.cpu.abilist")
     bridge = shell("getprop", "ro.dalvik.vm.native.bridge")
     print(f"Guest ABI list {abis}, native bridge {bridge}", flush=True)
-    if "arm64-v8a" not in abis.split(","):
-        raise RuntimeError("System image does not advertise ARM64 execution")
     # ADB root is used for collecting private diagnostics. Both apps run under Android's own app UID.
     assert shell("id", "-u") == "0", "Google APIs userdebug image required for diagnostic assertions"
     assert not shell("pm", "path", PKG, check=False), "Fresh emulator required"
@@ -148,6 +147,22 @@ def run():
     screenshot("missing-library")
     assert "System.loadLibrary" in note(loader, "java.log")
 
+    # Current API 33 Google APIs x86_64 images may omit ARM translation.
+    # Verify the real DEX on this OS, then exercise the native APK on API 31.
+    if "arm64-v8a" not in abis.split(","):
+        if api != "33":
+            raise RuntimeError(f"API {api} requires an ARM64-capable emulator image")
+        retried = new_attempt(loader, "Start / retry")
+        wait("second loader failure saved", lambda: "UnsatisfiedLinkError" in note(retried, "java-error.txt"))
+        shell("am", "force-stop", PKG)
+        launch()
+        visible("UnsatisfiedLinkError")
+        export_reports({f"{attempt}/java-error.txt": "UnsatisfiedLinkError" for attempt in (loader, retried)})
+        scope = f"API {api}: shipped Java launcher DEX, library failure, retry, reopen and ZIP export passed; guest ABI {abis} lacks ARM64."
+        print(scope, flush=True)
+        (OUT / "verified.txt").write_text(scope + "\n")
+        return
+
     adb("install", "-r", TEMP / "application.apk", timeout=120)
     launch()
     visible("UnsatisfiedLinkError")
@@ -159,7 +174,7 @@ def run():
     shell("am", "force-stop", PKG)
     launch()
     visible("expected zone/<language>/common_mp.ff")
-    export_reports(loader, missing)
+    export_reports({f"{missing}/failure.txt": "common_mp.ff", f"{loader}/java-error.txt": "UnsatisfiedLinkError"})
 
     # An incomplete media root must lose to a decodable installation under files/mw2.
     preferred = f"/sdcard/Android/media/{PKG}/mw2"
@@ -187,7 +202,9 @@ def run():
     visible("Menu presentation")
     reopened = new_attempt(menu, "Start / retry")
     wait("second cold synthetic presentation", lambda: presented(reopened), timeout=240)
-    print("API 33 emulator checks passed with synthetic content", flush=True)
+    scope = f"API {api}: complete ARM64 package reached and resumed a presented synthetic menu and survived a cold restart."
+    print(scope, flush=True)
+    (OUT / "verified.txt").write_text(scope + "\n")
 
 
 if __name__ == "__main__":

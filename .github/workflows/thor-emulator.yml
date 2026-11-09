@@ -22,9 +22,15 @@ permissions:
 jobs:
   emulator:
     if: github.ref == 'refs/heads/repair/thor-startup'
+    name: Android API ${{ matrix.api }} emulator
+    strategy:
+      fail-fast: false
+      matrix:
+        api: [31, 33]
     runs-on: ubuntu-24.04
     timeout-minutes: 80
     env:
+      QA_API: ${{ matrix.api }}
       GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v4
@@ -38,24 +44,29 @@ jobs:
       - name: Prepare disposable emulator-signed APKs
         run: |
           sdkmanager=$(find "$ANDROID_HOME/cmdline-tools" -type f -name sdkmanager | sort -V | tail -1)
-          "$sdkmanager" 'build-tools;35.0.0' 'platform-tools' 'emulator' 'system-images;android-33;google_apis;x86_64'
+          "$sdkmanager" 'build-tools;35.0.0' 'platform-tools' 'emulator' "system-images;android-$QA_API;google_apis;x86_64"
+          "$sdkmanager" --list_installed > "$QA_OUT/sdk-packages.txt"
+          cp "$ANDROID_HOME/system-images/android-$QA_API/google_apis/x86_64/source.properties" "$QA_OUT/system-image.properties"
           bt="$ANDROID_HOME/build-tools/35.0.0"
           apk="$RUNNER_TEMP/thor-build/IW4LJ-Thor-aligned-unsigned.apk"
           # This key signs only temporary emulator copies. No signed APK or key is uploaded.
           keytool -genkeypair -keystore "$RUNNER_TEMP/qa.jks" -alias qa -keyalg RSA -keysize 2048 \
             -dname 'CN=Ephemeral CI fixture' -validity 2 -storepass android -keypass android
           "$bt/apksigner" sign --ks "$RUNNER_TEMP/qa.jks" --ks-pass pass:android --out "$RUNNER_TEMP/application.apk" "$apk"
-          # Keep the DEX, manifest and ABI while deliberately removing the engine.
+          # Preserve identical DEX/manifest and remove native code for the loader-error test on either ABI.
           cp "$apk" "$RUNNER_TEMP/missing-engine.apk"
-          zip -qd "$RUNNER_TEMP/missing-engine.apk" lib/arm64-v8a/libiw4l_android.so
+          zip -qd "$RUNNER_TEMP/missing-engine.apk" 'lib/*'
+          for member in classes.dex AndroidManifest.xml; do
+            cmp <(unzip -p "$apk" "$member") <(unzip -p "$RUNNER_TEMP/missing-engine.apk" "$member")
+          done
           "$bt/zipalign" -f -P 16 4 "$RUNNER_TEMP/missing-engine.apk" "$RUNNER_TEMP/missing-aligned.apk"
           "$bt/apksigner" sign --ks "$RUNNER_TEMP/qa.jks" --ks-pass pass:android --out "$RUNNER_TEMP/loader-test.apk" "$RUNNER_TEMP/missing-aligned.apk"
-      - name: Boot accelerated API 33 Google APIs emulator
+      - name: Boot accelerated Google APIs emulator
         run: |
           test -c /dev/kvm
           sudo setfacl -m "u:$(id -un):rw" /dev/kvm
           mgr=$(find "$ANDROID_HOME/cmdline-tools" -type f -name avdmanager | sort -V | tail -1)
-          printf 'no\n' | "$mgr" create avd --force -n iw4l_qa -k 'system-images;android-33;google_apis;x86_64' -d pixel_2
+          printf 'no\n' | "$mgr" create avd --force -n iw4l_qa -k "system-images;android-$QA_API;google_apis;x86_64" -d pixel_2
           "$ANDROID_HOME/emulator/emulator" -avd iw4l_qa -port 5554 -accel on \
             -gpu swiftshader -feature Vulkan -no-window -no-snapshot -no-audio \
             -no-boot-anim -memory 4096 -cores 2 >"$QA_OUT/emulator.log" 2>&1 </dev/null &
@@ -90,7 +101,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: thor-api33-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          name: thor-api${{ matrix.api }}-evidence-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ env.QA_OUT }}/
           if-no-files-found: warn
           retention-days: 14
