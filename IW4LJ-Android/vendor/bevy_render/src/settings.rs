@@ -272,6 +272,14 @@ impl RenderCreation {
                 };
                 let settings = render_creation.clone();
 
+                // On Android the initial native window is delivered by the event loop.
+                // Freeze its absence on the owner thread before spawning adapter/device
+                // selection. Surface creation with an existing raw handle stays here.
+                #[cfg(target_os = "android")]
+                let primary_window = primary_window.filter(|holder| holder.0.lock().unwrap().is_some());
+                #[cfg(target_os = "android")]
+                let initialize_without_surface = primary_window.is_none();
+
                 let async_renderer = async move {
                     let render_resources = renderer::initialize_renderer(
                         backends,
@@ -290,8 +298,16 @@ impl RenderCreation {
                 bevy_tasks::IoTaskPool::get()
                     .spawn_local(async_renderer)
                     .detach();
-                // Otherwise, just block for it to complete
-                #[cfg(not(target_arch = "wasm32"))]
+                #[cfg(target_os = "android")]
+                if initialize_without_surface {
+                    std::thread::Builder::new()
+                        .name("IW4 GPU initialization".into())
+                        .spawn(move || bevy_tasks::block_on(async_renderer))
+                        .expect("could not start GPU initialization");
+                } else {
+                    bevy_tasks::block_on(async_renderer);
+                }
+                #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
                 bevy_tasks::block_on(async_renderer);
             }
         }

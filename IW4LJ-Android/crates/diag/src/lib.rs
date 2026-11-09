@@ -1,4 +1,6 @@
 mod alloc_count;
+mod android_startup;
+pub use android_startup::{android_event, android_failure, android_ready, android_stage};
 pub mod exit;
 pub mod gap;
 pub mod wgsl_dump;
@@ -214,6 +216,8 @@ pub fn latest_log_path() -> Option<PathBuf> {
 }
 
 pub fn exit_launch_error(message: &str) -> ! {
+    #[cfg(target_os = "android")]
+    android_failure(&format!("Explicit startup exit (2): {message}"));
     write_event(Channel::Launch, Level::Error, message, None, None);
     if let Some(sink) = SINK.get()
         && let Ok(mut state) = sink.lock()

@@ -6,7 +6,7 @@
 //! data and artifacts, then hands control to `bootstrap`, which assembles
 //! and runs the same `App` the desktop build does.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use bevy::prelude::*;
 
@@ -25,198 +25,56 @@ static HEAP: heap_probe::Probe = heap_probe::Probe;
 #[global_allocator]
 static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-const PACKAGE: &str = "dev.iw4j.iw4l";
+fn launch_path(name: &str) -> PathBuf {
+    std::env::var_os(name)
+        .map(PathBuf::from)
+        .unwrap_or_else(|| panic!("Android launcher did not supply {name}"))
+}
 
 #[bevy_main]
 fn main() {
-    #[cfg(feature = "heap-probe")]
-    heap_probe::start();
-
-    // A panic on any thread is written where `LaunchActivity` reads it, so a
-    // start that dies can say why on the next launch.
+    let attempt = launch_path("IW4L_STARTUP_DIR");
+    let crash_file = attempt.join("crash.txt");
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        let report = format!(
-            "{info}\nthread: {}\n{}",
-            std::thread::current().name().unwrap_or("?"),
-            std::backtrace::Backtrace::force_capture()
-        );
-        let path = format!("/data/data/{PACKAGE}/files/crash.txt");
-        let mut text = std::fs::read_to_string(&path).unwrap_or_default();
-        if text.len() < 12_000 {
-            text.push_str(&report);
-            text.push('\n');
-            let _ = std::fs::write(&path, text);
+        use std::io::Write;
+        let thread = std::thread::current();
+        let report = format!("{info}\nthread: {}\n{}", thread.name().unwrap_or("?"),
+            std::backtrace::Backtrace::force_capture());
+        // Keep the initiating panic if a second thread panics during shutdown.
+        if let Ok(mut file) = std::fs::OpenOptions::new().create_new(true).write(true).open(&crash_file) {
+            let _ = writeln!(file, "{report}");
+            let _ = file.sync_data();
         }
         default_hook(info);
     }));
+    diag::init_log(&attempt);
+    diag::android_stage("Native entry");
+    #[cfg(feature = "heap-probe")]
+    heap_probe::start();
 
-    let files = first_existing(&[
-        format!("/sdcard/Android/data/{PACKAGE}/files"),
-        format!("/storage/emulated/0/Android/data/{PACKAGE}/files"),
-    ])
-    .unwrap_or_else(|| PathBuf::from(format!("/data/data/{PACKAGE}/files")));
-
-    // `Android/media/<pkg>` is the one shared location a file manager and MTP
-    // can write to on Android 11+, unlike `Android/data`. The app creates it so
-    // a player can drag the game folder in over USB.
-    let media = first_existing(&[
-        format!("/sdcard/Android/media/{PACKAGE}"),
-        format!("/storage/emulated/0/Android/media/{PACKAGE}"),
-    ])
-    .unwrap_or_else(|| PathBuf::from(format!("/sdcard/Android/media/{PACKAGE}")));
-    let _ = std::fs::create_dir_all(&media);
-
-    let games = games_root(&files, &media);
-    let artifacts = files.join("iw4l-artifacts");
-    // Settings, the profile and the account live in the app's private storage.
-    // The shared `files` directory can hold folders the app does not own (a
-    // game copied in over adb or MTP), and a profile that cannot be written
-    // means unlocks and the player's name never survive a launch.
-    let config = PathBuf::from(format!("/data/data/{PACKAGE}/files/config"));
-    if let Err(error) = std::fs::create_dir_all(&config) {
-        eprintln!("config directory {}: {error}", config.display());
+    let files = launch_path("IW4L_ANDROID_FILES");
+    let media = launch_path("IW4L_ANDROID_MEDIA");
+    let config = launch_path("XDG_CONFIG_HOME");
+    let builtin = config.join("lan.iw4l-server");
+    if std::env::var_os("IW4L_COMMUNITY").as_deref() == Some(builtin.as_os_str())
+        && let Err(error) = std::fs::write(&builtin, lan::descriptor())
+    {
+        diag::warn!(Launch, "LAN descriptor {}: {error}", builtin.display());
     }
-
-    // Sound only because this runs before any other thread exists; other code
-    // reads `IW4L_GAMES` for content discovery and display.
-    unsafe {
-        std::env::set_var("IW4L_GAMES", &games);
-        std::env::set_var("IW4L_ARTIFACTS_DIR", &artifacts);
-        // `sync_mode.txt` = 0 (the mod menu's SYNC OFF): show frames as soon as they
-        // are ready instead of waiting for the display. A 60 Hz phone that can only
-        // draw 40 frames a second is held to 30 by the wait.
-        if std::env::var_os("IW4L_PRESENT_MODE").is_none()
-            && std::fs::read_to_string(files.join("sync_mode.txt")).is_ok_and(|text| text.trim() == "0")
-        {
-            std::env::set_var("IW4L_PRESENT_MODE", "AutoNoVsync");
-        }
-        // The driver's compiled pipelines, kept between launches: a phone GPU
-        // spends minutes on them otherwise. `IW4L_PIPELINE_CACHE=` (empty) turns
-        // it off.
-        if std::env::var_os("IW4L_PIPELINE_CACHE").is_none() {
-            std::env::set_var("IW4L_PIPELINE_CACHE", files.join("pipeline_cache.bin"));
-        }
-        // The settings and local profile are found through `HOME` or
-        // `XDG_CONFIG_HOME`; without one they are session-only and the unlocked
-        // progression would not survive a restart.
-        std::env::set_var("HOME", &files);
-        std::env::set_var("XDG_CONFIG_HOME", &config);
-        // `env.txt` beside the game: `NAME=value` lines set before anything
-        // reads the environment. A phone has no shell to launch from, and
-        // every tuning switch in the runtime is an environment variable.
-        for base in [&media, &files] {
-            let Ok(text) = std::fs::read_to_string(base.join("env.txt")) else {
-                continue;
-            };
-            for line in text.lines() {
-                if let Some((name, value)) = line.split_once('=')
-                    && !name.trim().is_empty()
-                    && !name.trim_start().starts_with('#')
-                    // A development test once left this line on a phone, and the
-                    // file could not be removed from inside the app.
-                    && !value.contains("give weapon/iw4:weapon/uzi_mp akimbo")
-                {
-                    std::env::set_var(name.trim(), value.trim());
-                }
-            }
-        }
-        // The mod menu's texture setting, written beside the game and applied
-        // from the next launch; without it the device's memory decides.
-        if std::env::var_os("IW4L_TEXTURE_SKIP").is_none()
-            && let Ok(skip) = std::fs::read_to_string(files.join("texture_skip.txt"))
-        {
-            std::env::set_var("IW4L_TEXTURE_SKIP", skip.trim());
-        }
-        // A phone has no console to type into, so maximum progression is the
-        // default script. Bots are never automatic: a 1v1 LAN is the point, so
-        // they are a mod-menu action. A `cmds.txt` dragged in beside the game,
-        // or `IW4L_CMDS`, overrides it; a script is how a match is started
-        // without the menus.
-        if std::env::var_os("IW4L_CMDS").is_none() {
-            let script = [&media, &files]
-                .into_iter()
-                .find_map(|base| std::fs::read_to_string(base.join("cmds.txt")).ok())
-                .filter(|text| !text.trim().is_empty())
-                // The same test's startup script (see above).
-                .filter(|text| !text.contains("map mp_terminal; wait world; spawn 0; force_match_start; bot add 1"))
-                .unwrap_or_else(|| "wait progression; unlock all".to_owned());
-            std::env::set_var("IW4L_CMDS", script);
-        }
-        // A `.iw4l-server` descriptor dropped next to the game selects the
-        // community master, so two phones on one network can meet without a
-        // console. Discovery has to be told where to look: this machine's files
-        // directory is not the launcher's own directory.
-        if std::env::var_os("IW4L_COMMUNITY").is_none() {
-            for base in [&media, &files] {
-                if let Some(path) = first_descriptor(base) {
-                    std::env::set_var("IW4L_COMMUNITY", path);
-                    break;
-                }
-            }
-        }
-        // With no community of its own, a phone is its own: the built-in LAN
-        // descriptor points the lobby browser at this device's loopback, where
-        // the relay runs when the player hosts and a forwarder to the host
-        // runs when they join (see the `lan` crate). It is kept apart from the
-        // folders a player drops descriptors into, so it never shadows one.
-        std::env::set_var("IW4L_COMMUNITY_ROOT", &config);
-        if std::env::var_os("IW4L_COMMUNITY").is_none() {
-            let builtin = config.join("lan.iw4l-server");
-            match std::fs::write(&builtin, lan::descriptor()) {
-                Ok(()) => std::env::set_var("IW4L_COMMUNITY", &builtin),
-                Err(error) => eprintln!("LAN descriptor {}: {error}", builtin.display()),
-            }
-        }
-    }
-
-    // `IW4L_BENCH=1` (in `env.txt`) prints a per-stage frame-time report when the
-    // game quits; the desktop entry arms it the same way.
     bootstrap::bench::arm();
-
-    // The desktop entry does this before launching. The selected community
-    // descriptor is what makes a master reachable, so the Android entry must
-    // select one too; on a non-Windows target this performs no update.
     if let Err(error) = updater::startup() {
-        eprintln!("community startup: {error}");
+        diag::warn!(Launch, "community startup: {error}");
     }
 
     bootstrap::launch(
-        asset_transport::GamesRoot(games),
-        artifacts,
+        asset_transport::GamesRoot(media.join("mw2")),
+        files.join("iw4l-artifacts"),
         bootstrap::LaunchMode::Menu,
         None,
         sim::HostCheats(true),
     );
-}
-
-fn first_existing(candidates: &[String]) -> Option<PathBuf> {
-    candidates
-        .iter()
-        .map(PathBuf::from)
-        .find(|path| path.is_dir())
-}
-
-/// Where the game install lives. Either location works: `media` is what a
-/// player can drag in over USB, `files` is what `adb push` writes. Whichever
-/// already holds a `zone/` wins; with neither, `media` is chosen so the folder
-/// a player is told to fill is the one the game will read.
-fn games_root(files: &Path, media: &Path) -> PathBuf {
-    for base in [media, files] {
-        let candidate = base.join("mw2");
-        if candidate.join("zone").is_dir() {
-            return candidate;
-        }
-    }
-    media.join("mw2")
-}
-
-fn first_descriptor(base: &Path) -> Option<PathBuf> {
-    let entries = std::fs::read_dir(base).ok()?;
-    entries.flatten().map(|entry| entry.path()).find(|path| {
-        path.extension()
-            .is_some_and(|ext| ext.eq_ignore_ascii_case("iw4l-server"))
-    })
+    diag::android_event("Native event loop returned");
 }
 
 // The input bridge: `GameActivity.java` keeps the input queue a NativeActivity

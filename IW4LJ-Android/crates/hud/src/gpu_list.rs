@@ -64,6 +64,8 @@ pub struct ShellshockScreen {
 
 #[derive(Resource, Clone, Debug, Default)]
 pub struct HudTessGpuFrame {
+    #[cfg(target_os = "android")]
+    pub main_menu_batches: std::ops::Range<usize>,
     pub vertices: Vec<HudTessVertex>,
     pub indices: Vec<u16>,
     pub batches: Vec<HudTessBatch>,
@@ -78,6 +80,10 @@ pub struct HudTessGpuFrame {
 
 impl HudTessGpuFrame {
     pub fn clear_geometry(&mut self) {
+        #[cfg(target_os = "android")]
+        {
+            self.main_menu_batches = 0..0;
+        }
         self.vertices.clear();
         self.indices.clear();
         self.batches.clear();

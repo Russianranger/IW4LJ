@@ -45,7 +45,25 @@ pub fn load_dotenv() {
     }
 }
 
+// The Android engine validates alternatives after its event loop starts. Publish
+// the winner for existing discovery callers without mutating process environment.
+#[cfg(target_os = "android")]
+static ANDROID_MENU_ROOT: std::sync::OnceLock<GamesRoot> = std::sync::OnceLock::new();
+
+#[cfg(target_os = "android")]
+pub fn set_android_menu_root(root: &GamesRoot) -> Result<(), String> {
+    let selected = ANDROID_MENU_ROOT.get_or_init(|| root.clone());
+    if selected != root {
+        return Err(format!("engine already opened {}", selected.0.display()));
+    }
+    Ok(())
+}
+
 pub fn games_root_from_env() -> Result<GamesRoot, String> {
+    #[cfg(target_os = "android")]
+    if let Some(selected) = ANDROID_MENU_ROOT.get() {
+        return Ok(selected.clone());
+    }
     load_dotenv();
     let path = match std::env::var_os("IW4L_GAMES") {
         Some(raw) => PathBuf::from(raw),
@@ -417,10 +435,33 @@ pub fn find_zone_file_version(
     zone: &str,
     version: u32,
 ) -> Result<ZoneFile, String> {
+    find_exact_version(game_files(&root.0), zone, version, || {
+        games_root_report(root)
+    })
+}
+
+/// A phone with two installations must never combine zones from different
+/// copies when determining which one is ready.
+pub fn find_iw4_zone_in_install(root: &Path, zone: &str) -> Result<ZoneFile, String> {
+    let directory = root.join("zone");
+    find_exact_version(
+        files_under(vec![directory.clone()]),
+        zone,
+        IW4_ZONE_VERSION,
+        || format!("under {}", directory.display()),
+    )
+}
+
+fn find_exact_version(
+    files: impl Iterator<Item = Result<PathBuf, String>>,
+    zone: &str,
+    version: u32,
+    describe_root: impl FnOnce() -> String,
+) -> Result<ZoneFile, String> {
     let file_name = format!("{zone}.ff");
     let mut found: Option<PathBuf> = None;
     let mut rejected = Vec::new();
-    for entry in game_files(&root.0) {
+    for entry in files {
         let path = match entry {
             Ok(path) => path,
             Err(error) => {
@@ -448,7 +489,7 @@ pub fn find_zone_file_version(
     let path = found.ok_or_else(|| {
         format!(
             "zone `{file_name}` version {version:#x} not found; {}; other candidates: {}",
-            games_root_report(root),
+            describe_root(),
             if rejected.is_empty() {
                 "none".to_owned()
             } else {

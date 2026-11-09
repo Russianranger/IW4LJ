@@ -558,37 +558,21 @@ pub fn ui_games_root(games: &GamesRoot) -> Result<GamesRoot, String> {
 }
 
 pub fn load_ui_menu_catalog(games: &GamesRoot) -> (MenuCatalog, Vec<String>) {
-    let mut catalog = MenuCatalog::default();
-    let mut report = Vec::new();
     let games = match ui_games_root(games) {
         Ok(root) => root,
-        Err(error) => return (catalog, vec![format!("menu catalog unavailable: {error}")]),
-    };
-    report.push(format!("menu asset root (IW4): {}", games.0.display()));
-    for zone in UI_MENU_ZONES {
-        match find_zone_file(&games, &format!("iw4:{zone}")) {
-            Ok(found) => match load_menu_catalog_with_iwd(&found.path, Some(&games.0)) {
-                Ok(part) => {
-                    report.push(format!(
-                        "menu catalog: {zone} {} menus ({} lists, {} assets, {} font headers, {} fonts; main={}, main_text={}) from {}",
-                        part.menus.len(),
-                        part.lists.len(),
-                        part.walked,
-                        part.font_headers,
-                        part.fonts.len(),
-                        part.get("main").is_some(),
-                        part.get("main_text").is_some(),
-                        found.path.display()
-                    ));
-                    catalog.absorb(part);
-                }
-                Err(error) => report.push(format!(
-                    "menu catalog gap: {zone} at {}: {error}",
-                    found.path.display()
-                )),
-            },
-            Err(error) => report.push(format!("menu catalog gap: {zone}: {error}")),
+        Err(error) => {
+            return (
+                MenuCatalog::default(),
+                vec![format!("menu catalog unavailable: {error}")],
+            );
         }
+    };
+    let mut report = vec![format!("menu asset root (IW4): {}", games.0.display())];
+    let mut catalog = MenuCatalog::default();
+    for zone in UI_MENU_ZONES {
+        let result = find_zone_file(&games, &format!("iw4:{zone}"))
+            .and_then(|found| absorb_menu_zone(&mut catalog, &games.0, &found));
+        report.push(result.unwrap_or_else(|error| format!("menu catalog gap: {zone}: {error}")));
     }
     report.push(format!(
         "menu catalog: {} menus after merge, {} zone font atlases",
@@ -596,6 +580,29 @@ pub fn load_ui_menu_catalog(games: &GamesRoot) -> (MenuCatalog, Vec<String>) {
         catalog.zone_image_n()
     ));
     (catalog, report)
+}
+
+pub(crate) fn absorb_menu_zone(
+    catalog: &mut MenuCatalog,
+    root: &Path,
+    found: &asset_transport::ZoneFile,
+) -> Result<String, String> {
+    let part = load_menu_catalog_with_iwd(&found.path, Some(root))
+        .map_err(|error| format!("{}: {error}", found.path.display()))?;
+    let summary = format!(
+        "menu catalog: {} {} menus ({} lists, {} assets, {} font headers, {} fonts; main={}, main_text={}) from {}",
+        found.zone_name,
+        part.menus.len(),
+        part.lists.len(),
+        part.walked,
+        part.font_headers,
+        part.fonts.len(),
+        part.get("main").is_some(),
+        part.get("main_text").is_some(),
+        found.path.display()
+    );
+    catalog.absorb(part);
+    Ok(summary)
 }
 
 pub fn load_menu_catalog(path: &Path) -> Result<MenuCatalog, String> {

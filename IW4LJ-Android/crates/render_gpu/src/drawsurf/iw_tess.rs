@@ -100,7 +100,44 @@ struct ExtractedTessFrame {
 }
 
 #[derive(Resource, Default)]
-struct ExtractedIwTess(ExtractedTessFrame);
+struct ExtractedIwTess(
+    ExtractedTessFrame,
+    #[cfg(target_os = "android")] FirstMenuFrame,
+);
+
+#[cfg(target_os = "android")]
+#[derive(Default)]
+struct FirstMenuFrame {
+    batches: std::ops::Range<usize>,
+    drew_menu: bool,
+    acquired_surface: bool,
+    presented: bool,
+}
+
+#[cfg(target_os = "android")]
+fn before_present(
+    mut tess: ResMut<ExtractedIwTess>,
+    windows: Query<&bevy::render::view::ExtractedWindow, With<bevy::window::PrimaryWindow>>,
+) {
+    let frame = &mut tess.1;
+    frame.acquired_surface = !frame.presented && !frame.batches.is_empty()
+        && windows.single().is_ok_and(|window| window.swap_chain_texture.is_some());
+}
+
+#[cfg(target_os = "android")]
+fn after_present(
+    mut tess: ResMut<ExtractedIwTess>,
+    windows: Query<&bevy::render::view::ExtractedWindow, With<bevy::window::PrimaryWindow>>,
+) {
+    let frame = &mut tess.1;
+    // render_system consumes the acquired primary swapchain image when it calls present.
+    if frame.acquired_surface && frame.drew_menu
+        && windows.single().is_ok_and(|window| window.swap_chain_texture.is_none())
+    {
+        frame.presented = true;
+        diag::android_ready("Presented primary surface frame with IW4 main menu draws");
+    }
+}
 
 struct SavedScreenCopy {
     texture: Texture,
@@ -254,6 +291,11 @@ fn init_pipeline(
 }
 
 fn extract_iw_tess(mut extracted: ResMut<ExtractedIwTess>, frame: Extract<Res<HudTessGpuFrame>>) {
+    #[cfg(target_os = "android")]
+    {
+        extracted.1.batches = frame.main_menu_batches.clone();
+        extracted.1.drew_menu = false;
+    }
     extracted.0 = ExtractedTessFrame {
         vertices: frame
             .vertices
@@ -437,7 +479,8 @@ fn prepare_iw_tess(
 
 fn draw_iw_tess(
     view: ViewQuery<(&ViewTarget, &ExtractedView)>,
-    extracted: Res<ExtractedIwTess>,
+    #[cfg(not(target_os = "android"))] extracted: Res<ExtractedIwTess>,
+    #[cfg(target_os = "android")] mut extracted: ResMut<ExtractedIwTess>,
     meta: Res<IwTessMeta>,
     pipeline: Res<IwTessPipeline>,
     mut specialized: ResMut<SpecializedRenderPipelines<IwTessPipeline>>,
@@ -596,6 +639,8 @@ fn draw_iw_tess(
     let mut streams = GfxCmdBufStreams::default();
     let mut bind_n = 0u32;
     let mut skip_n = 0u32;
+    #[cfg(target_os = "android")]
+    let mut drew_menu = false;
     for (id, bind, textures, geom) in &prepared {
         let Some(gpu_pipeline) = cache.get_render_pipeline(*id) else {
             continue;
@@ -621,8 +666,16 @@ fn draw_iw_tess(
         let start = geom.first_index;
         let end = start.saturating_add(geom.index_count);
         pass.draw_indexed(start..end, 0, 0..1);
+        #[cfg(target_os = "android")]
+        {
+            drew_menu |= extracted.1.batches.contains(&geom.batch_i);
+        }
     }
     drop(pass);
+    #[cfg(target_os = "android")]
+    {
+        extracted.1.drew_menu |= drew_menu;
+    }
     if let Some(slot) = stages.as_ref()
         && let Ok(mut guard) = slot.0.lock()
     {
@@ -759,6 +812,14 @@ pub(super) fn register(app: &mut App) {
     let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
         return;
     };
+    #[cfg(target_os = "android")]
+    render_app.add_systems(
+        Render,
+        (
+            before_present.before(bevy::render::renderer::render_system).in_set(RenderSystems::Render),
+            after_present.after(bevy::render::renderer::render_system).in_set(RenderSystems::Render),
+        ),
+    );
     render_app
         .init_resource::<ExtractedIwTess>()
         .init_resource::<HudBloodGpu>()

@@ -33,7 +33,9 @@ def symbols(path, readelf):
 
 
 def build_id(path, readelf):
-    return re.search(r"Build ID: ([0-9a-f]+)", run(readelf, "-n", path)).group(1)
+    match = re.search(r"Build ID: ([0-9a-f]+)", run(readelf, "-n", path))
+    require(match, f"{path.name} has no ELF build ID")
+    return match.group(1)
 
 
 apk, tools, toolchain, debug = map(Path, sys.argv[1:])

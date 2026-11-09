@@ -1,0 +1,52 @@
+name: Publish signed Thor test APK
+on:
+  workflow_dispatch:
+  push:
+    branches: ['repair/thor-startup']
+    paths: ['.github/thor-release.json']
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  release:
+    if: github.ref == 'refs/heads/repair/thor-startup'
+    runs-on: ubuntu-24.04
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Verify source and retrieve the signed build's input
+        run: |
+          receipt=.github/thor-release.json
+          run_id=$(jq -er '.run_id | numbers' "$receipt")
+          source_sha=$(jq -er '.source_sha | select(test("^[a-f0-9]{40}$"))' "$receipt")
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run_id" |
+            jq -e --arg sha "$source_sha" '.head_sha == $sha and .head_branch == "repair/thor-startup" and .conclusion == "success" and .path == ".github/workflows/thor-android.yml"'
+          echo "SOURCE_SHA=$source_sha" >> "$GITHUB_ENV"
+          gh run download "$run_id" --name thor-build --dir "$RUNNER_TEMP/thor"
+      - name: Install APK verification tools
+        run: |
+          if ! test -x "$ANDROID_HOME/build-tools/35.0.0/apksigner"; then
+            manager=$(find "$ANDROID_HOME/cmdline-tools" -type f -name sdkmanager | sort -V | tail -1)
+            "$manager" 'build-tools;35.0.0'
+          fi
+      - name: Apply and verify APK signature
+        run: |
+          cd "$RUNNER_TEMP/thor"
+          sha256sum -c SHA256SUMS-unsigned
+          python3 "$GITHUB_WORKSPACE/IW4LJ-Android/crates/android/offline-signature.py" \
+            --apksigner "$ANDROID_HOME/build-tools/35.0.0/apksigner" apply \
+            IW4LJ-Thor-aligned-unsigned.apk "$GITHUB_WORKSPACE/.github/thor-release.json" IW4LJ-Thor.apk
+          "$ANDROID_HOME/build-tools/35.0.0/zipalign" -c -P 16 4 IW4LJ-Thor.apk
+          sha256sum IW4LJ-Thor.apk libiw4l_android.so.debug.gz > SHA256SUMS
+      - name: Publish prerelease
+        run: |
+          cd "$RUNNER_TEMP/thor"
+          tag=thor-test-${SOURCE_SHA:0:12}
+          gh release create "$tag" --repo "$GITHUB_REPOSITORY" --target "$SOURCE_SHA" --prerelease \
+            --title "IW4LJ Thor startup test — ${SOURCE_SHA:0:12}" \
+            --notes 'Side-by-side ARM64 diagnostic candidate for Android 12+. Choose IW4LJ-Thor.apk to install. Physical Thor testing with your own MW2 multiplayer files is required.' \
+            IW4LJ-Thor.apk libiw4l_android.so.debug.gz SHA256SUMS package-report.txt

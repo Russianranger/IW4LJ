@@ -11,6 +11,10 @@ use asset_transport::{
     open_zone,
 };
 use asset_world::decode_rawfile_text;
+#[cfg(target_os = "android")]
+mod android_menu;
+#[cfg(target_os = "android")]
+pub use android_menu::{android_menu_roots, android_startup_menu};
 pub mod arena;
 mod attachment_hide;
 mod cac_host;

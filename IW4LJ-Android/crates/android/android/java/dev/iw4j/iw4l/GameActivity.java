@@ -42,17 +42,25 @@ import java.nio.file.Files;
  * what lets a phone that cannot shade its full panel hold a frame rate.
  */
 public class GameActivity extends NativeActivity implements InputManager.InputDeviceListener {
-    static {
-        // NativeActivity opens the library itself, outside the VM's own list,
-        // so the native methods below would not resolve without this.
-        System.loadLibrary("iw4l_android");
-    }
+    private File attempt;
+    private android.widget.TextView loading;
+    private android.widget.PopupWindow loadingWindow;
+    private volatile boolean menuPresented;
+    private final java.util.concurrent.ScheduledExecutorService statusWorker =
+        java.util.concurrent.Executors.newSingleThreadScheduledExecutor();
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
-        // Cleared in onPause; if it is still set at the next launch, this one died.
-        LaunchActivity.writeState(this, "starting");
+        attempt = EngineLoaderActivity.attemptFor(this);
+        try {
+            // Android may restore this activity directly in a new process.
+            EngineLoaderActivity.prepare(this, attempt);
+        } catch (Exception error) {
+            throw new IllegalStateException("Could not restore the game library and paths", error);
+        }
+        StartupReport.event(attempt, "NativeActivity.onCreate begin");
         super.onCreate(savedInstanceState);
+        StartupReport.event(attempt, "NativeActivity.onCreate acknowledged");
         // Input goes through the view hierarchy, to the dispatch methods below.
         getWindow().takeInputQueue(null);
         // A match has long stretches with no touch (a pad, a killcam); the
@@ -94,17 +102,71 @@ public class GameActivity extends NativeActivity implements InputManager.InputDe
         findViewById(android.R.id.content).addOnLayoutChangeListener(
             (view, left, top, right, bottom, oldLeft, oldTop, oldRight, oldBottom) ->
                 nativeView(right - left, bottom - top, lines));
+        loading = new android.widget.TextView(this);
+        loading.setGravity(android.view.Gravity.CENTER);
+        loading.setBackgroundColor(android.graphics.Color.BLACK);
+        loading.setTextColor(android.graphics.Color.WHITE);
+        loading.setText("Starting MW2…");
+        // A NativeActivity owns its main window surface. Draw this status in
+        // a separate window so native presentation cannot overwrite it.
+        loadingWindow = new android.widget.PopupWindow(loading, -1, -1, false);
+        loadingWindow.setTouchable(false);
+        getWindow().getDecorView().post(() -> {
+            if (!menuPresented && !isFinishing() && !isDestroyed()) {
+                loadingWindow.showAtLocation(getWindow().getDecorView(), android.view.Gravity.CENTER, 0, 0);
+            }
+        });
+        statusWorker.scheduleWithFixedDelay(this::readStartup, 0, 500,
+            java.util.concurrent.TimeUnit.MILLISECONDS);
+    }
+
+    private void readStartup() {
+        boolean failed = StartupReport.present(attempt, "failure.txt") || StartupReport.present(attempt, "crash.txt");
+        if (menuPresented && !failed) return;
+        boolean ready = StartupReport.present(attempt, "ready.txt");
+        String stage = ready || failed ? "" : StartupReport.read(attempt, "stage.txt", 2048);
+        runOnUiThread(() -> {
+            if (isFinishing() || isDestroyed()) return;
+            if (failed) {
+                StartupReport.event(attempt, "startup/render failure recorded; returning to setup");
+                finish();
+            } else if (ready) {
+                menuPresented = true;
+                loadingWindow.dismiss();
+            } else if (!stage.isEmpty()) {
+                loading.setText(stage);
+            }
+        });
+    }
+
+    @Override
+    public void surfaceCreated(android.view.SurfaceHolder holder) {
+        StartupReport.event(attempt, "surfaceCreated begin");
+        super.surfaceCreated(holder);
+        StartupReport.event(attempt, "surfaceCreated acknowledged");
+    }
+
+    @Override
+    public void surfaceDestroyed(android.view.SurfaceHolder holder) {
+        StartupReport.event(attempt, "surfaceDestroyed begin");
+        super.surfaceDestroyed(holder);
+        StartupReport.event(attempt, "surfaceDestroyed acknowledged");
     }
 
     private WifiManager.MulticastLock broadcastLock;
 
     @Override
     protected void onDestroy() {
+        StartupReport.event(attempt, "NativeActivity.onDestroy begin");
+        statusWorker.shutdownNow();
+        if (loadingWindow != null) loadingWindow.dismiss();
+        rumbleThread.quitSafely();
         if (broadcastLock != null && broadcastLock.isHeld()) {
             broadcastLock.release();
         }
         getSystemService(InputManager.class).unregisterInputDeviceListener(this);
         super.onDestroy();
+        StartupReport.event(attempt, "NativeActivity.onDestroy acknowledged");
     }
 
     @Override
@@ -261,26 +323,23 @@ public class GameActivity extends NativeActivity implements InputManager.InputDe
 
     @Override
     protected void onResume() {
+        StartupReport.event(attempt, "NativeActivity.onResume begin");
         super.onResume();
+        StartupReport.event(attempt, "NativeActivity.onResume acknowledged");
         handler.removeCallbacks(promptPoll);
         handler.post(promptPoll);
         rumbleHandler.removeCallbacks(rumblePoll);
         rumbleHandler.post(rumblePoll);
-        // A start that is still alive after this long did not die on the way in.
-        handler.removeCallbacks(startedOk);
-        handler.postDelayed(startedOk, 15000);
     }
-
-    private final Runnable startedOk = () -> LaunchActivity.writeState(this, "ok");
 
     @Override
     protected void onPause() {
-        handler.removeCallbacks(startedOk);
+        StartupReport.event(attempt, "NativeActivity.onPause begin");
         handler.removeCallbacks(promptPoll);
         rumbleHandler.removeCallbacks(rumblePoll);
         releasePads();
-        LaunchActivity.writeState(this, "ok");
         super.onPause();
+        StartupReport.event(attempt, "NativeActivity.onPause acknowledged");
     }
 
     // -- Render resolution ---------------------------------------------------
@@ -314,6 +373,7 @@ public class GameActivity extends NativeActivity implements InputManager.InputDe
 
     @Override
     public boolean dispatchTouchEvent(MotionEvent event) {
+        if (!menuPresented) return true;
         View content = findViewById(android.R.id.content);
         if (content == null || content.getWidth() == 0 || content.getHeight() == 0) {
             return true;
@@ -523,6 +583,13 @@ public class GameActivity extends NativeActivity implements InputManager.InputDe
     @Override
     public boolean dispatchKeyEvent(KeyEvent event) {
         int code = event.getKeyCode();
+        if (!menuPresented && code == KeyEvent.KEYCODE_BACK) {
+            if (event.getAction() == KeyEvent.ACTION_UP) {
+                StartupReport.event(attempt, "player returned to setup during startup");
+                finish();
+            }
+            return true;
+        }
         boolean down = event.getAction() == KeyEvent.ACTION_DOWN;
         boolean padKey =
             KeyEvent.isGamepadButton(code)

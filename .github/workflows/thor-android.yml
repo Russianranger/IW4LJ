@@ -27,9 +27,15 @@ jobs:
           java-version: '17'
       - name: Install toolchain
         run: |
+          if [ "$(df -Pk "$GITHUB_WORKSPACE" | awk 'END {print $4}')" -lt 16777216 ]; then
+            sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup
+          fi
           rustup toolchain install 1.99.1 --profile minimal --target aarch64-linux-android
           echo RUSTUP_TOOLCHAIN=1.99.1 >> "$GITHUB_ENV"
-          sdkmanager 'platforms;android-34' 'build-tools;35.0.0' 'ndk;28.2.13676358'
+          manager=$(find "$ANDROID_HOME/cmdline-tools" -type f -name sdkmanager | sort -V | tail -1)
+          test -x "$manager"
+          "$manager" 'platforms;android-34' 'build-tools;35.0.0' 'ndk;28.2.13676358'
+          df -h "$GITHUB_WORKSPACE"
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: IW4LJ-Android

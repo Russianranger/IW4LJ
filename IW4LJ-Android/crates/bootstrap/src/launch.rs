@@ -189,6 +189,7 @@ fn install_class_catalog(
             preview.image = format!("iw4:material/{}", preview.image);
         }
     }
+    diag::android_stage("Common assets installed; waiting for the main menu frame");
     strings.absorb(common.strings);
     commands.insert_resource(class_catalog);
     commands.remove_resource::<ShellCommonTask>();
@@ -228,9 +229,13 @@ pub fn launch(
     acceptance: Option<AcceptanceLaunch>,
     cheats: sim::HostCheats,
 ) {
-    asset_transport::set_game_folders(console::stored_game_folders(&artifacts));
-    let steam = asset_transport::link_steam_games(&games);
-    diag::info!(Launch, "{}", asset_transport::games_root_report(&games));
+    #[cfg(not(target_os = "android"))]
+    let steam = {
+        asset_transport::set_game_folders(console::stored_game_folders(&artifacts));
+        let probe = asset_transport::link_steam_games(&games);
+        diag::info!(Launch, "{}", asset_transport::games_root_report(&games));
+        probe
+    };
 
     if let Some(plan) = crate::frame_owner::prefer_performance_cores() {
         assets::publish_process_cpus(plan.allowed.clone());
@@ -250,6 +255,9 @@ pub fn launch(
                     render::diag::acceptance::ACCEPTANCE_MAPS.join(", ")
                 ));
             }
+            #[cfg(target_os = "android")]
+            android_menu::run(games, artifacts, cheats);
+            #[cfg(not(target_os = "android"))]
             run_menu(games, artifacts, cheats, &steam);
         }
         LaunchMode::Map(zone) => run_map(
@@ -313,6 +321,7 @@ fn run_export_gltf(games: asset_transport::GamesRoot, artifacts: PathBuf, zone_a
     diag::announce_stdout(&summary.report_line());
 }
 
+#[cfg(not(target_os = "android"))]
 fn mw2_not_found(
     games: &asset_transport::GamesRoot,
     steam: &asset_transport::SteamProbe,
@@ -371,6 +380,197 @@ fn mw2_not_found(
     text
 }
 
+struct PreparedMenu {
+    games: asset_transport::GamesRoot,
+    ui_games: asset_transport::GamesRoot,
+    menus: asset_game::MenuCatalog,
+    strings: Option<asset_game::LocalizeCatalog>,
+    maps: MenuMapList,
+    audio: Option<audio::FrontendAudio>,
+    master: net::MasterLaunchIntent,
+    common: ShellCommonTask,
+}
+
+fn menu_master_intent(have: master_protocol::ContentFlags) -> net::MasterLaunchIntent {
+    if have.0 & net::CONTENT_IW4 == 0 {
+        diag::warn!(
+            Net,
+            "master browser disabled: IW4 common_mp.ff is not installed"
+        );
+        net::MasterLaunchIntent::disabled()
+    } else {
+        net::MasterLaunchIntent::browser_from_env(have).unwrap_or_else(|error| {
+            diag::warn!(Net, "master browser disabled: {error}");
+            net::MasterLaunchIntent::disabled()
+        })
+    }
+}
+
+fn prepare_menu(
+    games: asset_transport::GamesRoot,
+    ui_games: asset_transport::GamesRoot,
+    menus: asset_game::MenuCatalog,
+    shell_common: bevy::tasks::Task<assets::ShellCommon>,
+) -> PreparedMenu {
+    diag::android_stage("Indexing maps and game namespaces");
+    let maps = list_mp_map_packs(&games);
+    diag::info!(
+        Launch,
+        "menu: {} maps in {} packs under {}",
+        maps.iter().map(|pack| pack.maps.len()).sum::<usize>(),
+        maps.len(),
+        games.0.display()
+    );
+    let namespace_trees = NamespaceTrees::discover(&games);
+    let master = menu_master_intent(content_flags(&namespace_trees));
+    diag::android_stage("Reading menu localization");
+    let strings = match load_mp_localized_strings(&ui_games, "iw4:code_post_gfx_mp") {
+        Ok(loc) => {
+            diag::info!(Launch, "menu: {} localize keys", loc.len());
+            Some(loc)
+        }
+        Err(error) => {
+            diag::warn!(Launch, "menu: localize: {error}");
+            None
+        }
+    };
+    diag::android_stage("Reading menu sound bank");
+    let menu_bank = match load_mp_sound_bank(&ui_games, "iw4:code_post_gfx_mp") {
+        Ok(loaded) => {
+            diag::info!(Launch, "menu: sound bank ready");
+            for line in loaded.gap_lines() {
+                diag::warn!(Launch, "menu: {line}");
+            }
+            let bank = std::sync::Arc::new(loaded.catalog);
+            Some(bank)
+        }
+        Err(error) => {
+            diag::warn!(Launch, "menu: sound bank: {error}");
+            None
+        }
+    };
+
+    diag::android_stage("Opening sound archives");
+    let (menu_iwd, lines) = NamespaceSoundIwd::open(&namespace_trees);
+    for line in lines {
+        diag::info!(Launch, "menu: {line}");
+    }
+    let menu_iwd = std::sync::Arc::new(menu_iwd);
+    let audio = menu_bank.map(|bank| {
+        let clips = audio::ClipStore::start(std::sync::Arc::clone(&bank), Some(menu_iwd));
+        audio::FrontendAudio { bank, clips }
+    });
+    PreparedMenu {
+        games,
+        ui_games,
+        common: ShellCommonTask {
+            task: shell_common,
+            perk_table: menus.string_table("mp/perkTable.csv").cloned(),
+            started: std::time::Instant::now(),
+        },
+        menus,
+        strings,
+        maps: MenuMapList(maps),
+        audio,
+        master,
+    }
+}
+
+fn install_menu(world: &mut World, menu: PreparedMenu) {
+    world.resource_mut::<LaunchIdentity>().games_root = menu.games.0;
+    world.insert_resource(menu.master);
+    world.insert_resource(menu.common);
+    world.insert_resource(frame::FrontendContentLoading);
+    world.insert_resource(menu.menus);
+    if let Some(strings) = menu.strings {
+        world.insert_resource(strings);
+    }
+    if let Some(audio) = menu.audio {
+        world.insert_resource(audio);
+    }
+    world.insert_resource(menu.maps);
+    world.insert_resource(UiAssetRoot(Some(menu.ui_games.0)));
+    world.insert_resource(StartupCommands {
+        lines: console::startup_commands(),
+    });
+    world.insert_resource(AppScreen::MainMenu);
+}
+
+fn menu_app(
+    config: &LaunchConfig,
+    cheats: sim::HostCheats,
+    master: net::MasterLaunchIntent,
+    prepared: Option<PreparedMenu>,
+) -> App {
+    let mut app = App::new();
+    if std::env::var_os("IW4L_PRESENT_MODE").is_some() {
+        app.insert_resource(ui::PresentModeOverride(launch_present_mode(false)));
+    }
+    app.insert_resource(master);
+    app.add_plugins(crate::plugins::default_plugins_with_quiet_log(
+        WindowPlugin {
+            exit_condition: exit_condition(),
+            primary_window: Some(Window {
+                title: "iw4l".into(),
+                resolution: (1280, 720).into(),
+                ..default()
+            }),
+            ..default()
+        },
+    ));
+    app.add_systems(
+        Update,
+        (install_class_catalog, adopt_shell_ui_images)
+            .chain()
+            .in_set(net::ClientSet::Load)
+            .after(frame::SessionSwapApplied),
+    )
+    .insert_resource(launch_identity(config))
+    .insert_resource(cheats)
+    .insert_resource(ClearColor(Color::srgb(0.04, 0.045, 0.06)));
+    if let Some(prepared) = prepared {
+        install_menu(app.world_mut(), prepared);
+    }
+    add_runtime_plugins(&mut app);
+    if let Some(capture) = CaptureRequest::from_env() {
+        queue_launch_capture(
+            &mut app,
+            CaptureRequest {
+                exit_after_capture: true,
+                ..capture
+            },
+        );
+    }
+    bench::announce_runtime(&mut app);
+    if bench::enabled() {
+        bench::insert(
+            &mut app,
+            "menu-session",
+            None,
+            "menu",
+            &config.artifacts,
+            asset_transport::LoadProgress::default(),
+        );
+    }
+    app
+}
+
+fn run_menu_app(mut app: App, artifacts: &std::path::Path) {
+    let result = app.run();
+    #[cfg(target_os = "android")]
+    if result.is_error() {
+        diag::android_failure(
+            "Engine event loop returned an error. See native.log and the engine log.",
+        );
+    }
+    let _ = result;
+    let trace = flush_perf();
+    if bench::enabled() {
+        bench::finish(artifacts, trace);
+    }
+}
+
+#[cfg(not(target_os = "android"))]
 fn run_menu(
     games: asset_transport::GamesRoot,
     artifacts: PathBuf,
@@ -405,136 +605,19 @@ fn run_menu(
             menu_report.join("\n")
         ));
     }
-    let maps = list_mp_map_packs(&games);
-    diag::info!(
-        Launch,
-        "menu: {} maps in {} packs under {}",
-        maps.iter().map(|pack| pack.maps.len()).sum::<usize>(),
-        maps.len(),
-        games.0.display()
-    );
+    let menu = prepare_menu(games, ui_games, menus, shell_common);
     let config = LaunchConfig {
         role: Role::Listen,
         zone: String::new(),
-        games_root: games.0.clone(),
+        games_root: menu.games.0.clone(),
         artifacts,
     };
-    let mut app = App::new();
-    if std::env::var_os("IW4L_PRESENT_MODE").is_some() {
-        app.insert_resource(ui::PresentModeOverride(launch_present_mode(false)));
-    }
-    let namespace_trees = NamespaceTrees::discover(&games);
-    let have = content_flags(&namespace_trees);
-    let master_intent = if have.0 & net::CONTENT_IW4 == 0 {
-        diag::warn!(
-            Net,
-            "master browser disabled: IW4 common_mp.ff is not installed"
-        );
-        net::MasterLaunchIntent::disabled()
-    } else {
-        net::MasterLaunchIntent::browser_from_env(have).unwrap_or_else(|error| {
-            diag::warn!(Net, "master browser disabled: {error}");
-            net::MasterLaunchIntent::disabled()
-        })
-    };
-    app.insert_resource(master_intent);
-    app.add_plugins(crate::plugins::default_plugins_with_quiet_log(
-        WindowPlugin {
-            exit_condition: exit_condition(),
-            primary_window: Some(Window {
-                title: "iw4l".into(),
-                resolution: (1280, 720).into(),
-                ..default()
-            }),
-            ..default()
-        },
-    ));
-    app.insert_resource(ShellCommonTask {
-        task: shell_common,
-        perk_table: menus.string_table("mp/perkTable.csv").cloned(),
-        started: std::time::Instant::now(),
-    })
-    .insert_resource(frame::FrontendContentLoading)
-    .add_systems(
-        Update,
-        (install_class_catalog, adopt_shell_ui_images)
-            .chain()
-            .in_set(net::ClientSet::Load)
-            .after(frame::SessionSwapApplied),
-    );
-    match load_mp_localized_strings(&ui_games, "iw4:code_post_gfx_mp") {
-        Ok(loc) => {
-            diag::info!(Launch, "menu: {} localize keys", loc.len());
-            app.insert_resource(loc);
-        }
-        Err(error) => diag::warn!(Launch, "menu: localize: {error}"),
-    }
-    app.insert_resource(menus);
-    let menu_bank = match load_mp_sound_bank(&ui_games, "iw4:code_post_gfx_mp") {
-        Ok(loaded) => {
-            diag::info!(Launch, "menu: sound bank ready");
-            for line in loaded.gap_lines() {
-                diag::warn!(Launch, "menu: {line}");
-            }
-            let bank = std::sync::Arc::new(loaded.catalog);
-            Some(bank)
-        }
-        Err(error) => {
-            diag::warn!(Launch, "menu: sound bank: {error}");
-            None
-        }
-    };
-
-    let (menu_iwd, lines) = NamespaceSoundIwd::open(&namespace_trees);
-    for line in lines {
-        diag::info!(Launch, "menu: {line}");
-    }
-    let menu_iwd = std::sync::Arc::new(menu_iwd);
-    if let Some(bank) = menu_bank {
-        let clips = audio::ClipStore::start(std::sync::Arc::clone(&bank), Some(menu_iwd));
-        app.insert_resource(audio::FrontendAudio { bank, clips });
-    }
-    app.insert_resource(launch_identity(&config))
-        .insert_resource(cheats)
-        .insert_resource(MenuMapList(maps))
-        .insert_resource(AppScreen::MainMenu)
-        .insert_resource(UiAssetRoot(Some(ui_games.0)))
-        .insert_resource(StartupCommands {
-            lines: console::startup_commands(),
-        })
-        .insert_resource(ClearColor(Color::srgb(0.04, 0.045, 0.06)))
-        .insert_resource({
-            let mut layers = UiLayers::default();
-            layers.show_only([UiLayer::Shell, UiLayer::Overlay]);
-            layers
-        });
-    add_runtime_plugins(&mut app);
-    if let Some(capture) = CaptureRequest::from_env() {
-        queue_launch_capture(
-            &mut app,
-            CaptureRequest {
-                exit_after_capture: true,
-                ..capture
-            },
-        );
-    }
-    bench::announce_runtime(&mut app);
-    if bench::enabled() {
-        bench::insert(
-            &mut app,
-            "menu-session",
-            None,
-            "menu",
-            &config.artifacts,
-            asset_transport::LoadProgress::default(),
-        );
-    }
-    app.run();
-    let trace = flush_perf();
-    if bench::enabled() {
-        bench::finish(&config.artifacts, trace);
-    }
+    let app = menu_app(&config, cheats, menu.master.clone(), Some(menu));
+    run_menu_app(app, &config.artifacts);
 }
+
+#[cfg(target_os = "android")]
+mod android_menu;
 
 fn run_play(
     games: asset_transport::GamesRoot,

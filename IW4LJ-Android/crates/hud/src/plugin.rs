@@ -606,6 +606,7 @@ fn flush_targetmap_tess(
 
 fn flush_script_menus_tess(
     surface: Res<crate::surface::Hud2dSurface>,
+    #[cfg(target_os = "android")] menus: crate::MenuState,
     mut pass: ResMut<HudTessPass>,
     mut hud_images: ResMut<HudImages>,
     mut images: ResMut<Assets<Image>>,
@@ -621,6 +622,8 @@ fn flush_script_menus_tess(
     }
     let job = std::mem::take(&mut pass.script_menus);
     if let Ok((_, mut host, mut latch)) = raster.single_mut() {
+        #[cfg(target_os = "android")]
+        let first_batch = frame.batches.len();
         gpu_list::apply_tess_job(
             job,
             &mut host,
@@ -631,6 +634,10 @@ fn flush_script_menus_tess(
             surface.width(),
             surface.height(),
         );
+        #[cfg(target_os = "android")]
+        if menus.is_some_and(|state| state.position("iw4l_main").is_some()) {
+            frame.main_menu_batches = first_batch..frame.batches.len();
+        }
     }
 }
 

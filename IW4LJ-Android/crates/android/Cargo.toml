@@ -30,26 +30,5 @@ heap-probe = []
 [lints]
 workspace = true
 
-[package.metadata.android]
-package = "dev.iw4j.iw4l"
-apk_name = "iw4l"
-build_targets = ["aarch64-linux-android"]
-strip = "strip"
-
-[package.metadata.android.sdk]
-target_sdk_version = 34
-min_sdk_version = 31
-
-[package.metadata.android.application]
-label = "IW4L"
-
-[package.metadata.android.application.activity]
-screen_orientation = "landscape"
-
-# The `play` profile is a release build, so cargo-apk wants a real keystore.
-# This is a local development key, not a store key; the file is git-ignored.
-[package.metadata.android.signing.play]
-path = "iw4l-dev.keystore"
-keystore_password = "iw4l-dev-pass"
-key_alias = "iw4l"
-key_password = "iw4l-dev-pass"
+# The Android entry activities and controller bridge require DEX. Build the APK
+# with package-linux.sh or package.ps1 alongside this manifest.
