@@ -1,0 +1,115 @@
+# Builds, signs and publishes the bots-and-progression Thor test APK.
+#
+# The signing key is the test key committed beside this file. It is not the
+# Thor test key the startup-repair releases use (that one stays with its
+# owner), so this APK installs only after the earlier Thor test app has been
+# removed — move the mw2 folder out first; see the release notes.
+name: Thor bots test APK
+on:
+  workflow_dispatch:
+  push:
+    branches: ['claude/thor-bots-progression']
+    paths:
+      - 'IW4LJ-Android/Cargo.*'
+      - 'IW4LJ-Android/crates/**'
+      - 'IW4LJ-Android/vendor/**'
+      - '.github/workflows/thor-bots-test.yml'
+      - '.github/thor-bots-test.p12'
+permissions:
+  contents: write
+
+jobs:
+  android:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Install toolchain
+        run: |
+          if [ "$(df -Pk "$GITHUB_WORKSPACE" | awk 'END {print $4}')" -lt 16777216 ]; then
+            sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup
+          fi
+          rustup toolchain install 1.99.1 --profile minimal --target aarch64-linux-android
+          echo RUSTUP_TOOLCHAIN=1.99.1 >> "$GITHUB_ENV"
+          manager=$(find "$ANDROID_HOME/cmdline-tools" -type f -name sdkmanager | sort -V | tail -1)
+          test -x "$manager"
+          "$manager" 'platforms;android-34' 'build-tools;35.0.0' 'ndk;28.2.13676358'
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: IW4LJ-Android
+          key: android-r28c-api31-play
+      - name: Build and audit APK
+        env:
+          CARGO_BUILD_JOBS: 3
+        run: |
+          set -o pipefail
+          unset ANDROID_NDK_HOME
+          bash IW4LJ-Android/crates/android/package-linux.sh "$RUNNER_TEMP/thor-build" 2>&1 | tee "$RUNNER_TEMP/build.log"
+      - name: Sign
+        run: |
+          tools="$ANDROID_HOME/build-tools/35.0.0"
+          cd "$RUNNER_TEMP/thor-build"
+          "$tools/apksigner" sign --ks "$GITHUB_WORKSPACE/.github/thor-bots-test.p12" \
+            --ks-key-alias thor-bots-test --ks-pass pass:thor-bots-test \
+            --alignment-preserved true --v1-signing-enabled false --v4-signing-enabled false \
+            --out IW4LJ-Thor-bots.apk IW4LJ-Thor-aligned-unsigned.apk
+          cert=$("$tools/apksigner" verify --print-certs IW4LJ-Thor-bots.apk | sed -n 's/^Signer #1 certificate SHA-256 digest: //p')
+          test "$cert" = d7e6c30a9b13aea9e8536fe3a39a21c8f56c2abf26ed934667b66a94ae153d4b
+          "$tools/zipalign" -c -P 16 4 IW4LJ-Thor-bots.apk
+          test "$(unzip -p IW4LJ-Thor-bots.apk assets/iw4l-source.txt)" = "$GITHUB_SHA"
+          sha256sum IW4LJ-Thor-bots.apk libiw4l_android.so.debug.gz > SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: thor-bots-build
+          path: ${{ runner.temp }}/thor-build/
+          if-no-files-found: error
+          compression-level: 1
+          retention-days: 30
+      - name: Publish prerelease
+        run: |
+          cd "$RUNNER_TEMP/thor-build"
+          tag=thor-bots-${GITHUB_SHA:0:12}
+          cat > notes.md <<'NOTES'
+          Test build: the Thor startup-repair engine plus the bot AI pass and normal rank progression. Not yet played on a device.
+
+          **Install `IW4LJ-Thor-bots.apk`.** It is signed with a different test key from the earlier `thor-test-*` builds, so Android will not install it over them. Before the first install:
+
+          1. With a file manager, move the `mw2` folder out of `Android/media/dev.iw4j.iw4l.thor/` to somewhere else on the same storage (for example the top of internal storage). Uninstalling deletes that folder otherwise.
+          2. Uninstall **IW4LJ Thor Test**.
+          3. Install this APK and open it once so it creates its folder again.
+          4. Move `mw2` back into `Android/media/dev.iw4j.iw4l.thor/`.
+
+          Later `thor-bots-*` builds install over this one and keep its data.
+
+          In the mod menu: **ACCOUNT -> MY RANK** shows level and XP; **RESET LEVEL** (from the main menu) starts from level 1 if the account is at the top rank; **BOTS** has the four skill levels.
+          NOTES
+          gh release create "$tag" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --prerelease \
+            --title "IW4LJ Thor bots and progression test — ${GITHUB_SHA:0:12}" --notes-file notes.md \
+            IW4LJ-Thor-bots.apk libiw4l_android.so.debug.gz SHA256SUMS package-report.txt
+      # The run's own log needs a signed-in browser. This puts the part that
+      # explains a failed build where it can be fetched with plain git.
+      - name: Keep the failure log
+        if: failure()
+        run: |
+          log=$(mktemp -d)
+          cd "$log"
+          git init -q
+          for name in build; do
+            src="$RUNNER_TEMP/$name.log"
+            [ -f "$src" ] || continue
+            grep -n -E '^(error|warning: unused)' -A 30 "$src" | head -c 600000 > "$name-errors.txt" || true
+            tail -n 200 "$src" > "$name-tail.txt"
+          done
+          echo "$GITHUB_SHA" > source.txt
+          git add -A
+          git -c user.name=thor-ci -c user.email=thor-ci@users.noreply.github.com commit -q -m "Build log for $GITHUB_SHA"
+          git push -q -f "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}" HEAD:refs/heads/claude/ci-logs

@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="dev.iw4j.iw4l.thor"
-    android:versionCode="20000002"
-    android:versionName="0.2.2-thor.2">
+    android:versionCode="20000003"
+    android:versionName="0.2.2-thor.3-bots">
 
     <uses-sdk android:minSdkVersion="31" android:targetSdkVersion="34" />
     <!-- LAN play: sockets, and hearing the host's announcement over Wi-Fi. -->

@@ -2,7 +2,7 @@ name: Thor Android build
 on:
   workflow_dispatch:
   push:
-    branches: ['repair/thor-startup', 'claude/thor-bots-progression']
+    branches: ['repair/thor-startup']
     paths:
       - 'IW4LJ-Android/Cargo.*'
       - 'IW4LJ-Android/crates/**'
