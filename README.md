@@ -41,9 +41,9 @@ server error; the install guide has a fix list.
 | **Built for phones** | Touch controls with an on-screen pad, plus full **Bluetooth / USB controller** support with rumble. Draws under the camera cutout and respects the safe area. |
 | **Play with friends** | **LAN and online**: one phone hosts, the others join from the LAN tab or by IP. **Android and iPhone can play in the same match.** |
 | **Quick start** | One tap in the **MATCH** tab restarts your last map with the bots you last added, so you are back in a match in seconds. |
-| **Bots** | Add 1 or 5 bots, still bots, freeze them, make them fire. Good for practice and 1v1 setups. |
+| **Bots** | Add 1 or 5 bots that fight back: they hear gunfire and footsteps, turn when shot, aim down sights, strafe, and work each weapon the way it fires. Four skill levels (recruit, regular, hardened, veteran) in the **BOTS** tab. Still bots, freeze and fire for practice and 1v1 setups. |
 | **Mod menu on the phone** | Tap **MENU** (or three-finger tap, or the controller's home button) for tabs: **LAN, TRICKSHOT, SKINS, MATCH, BOTS, MAPS, ACCOUNT, GRAPHICS**. |
-| **Progression** | Unlock everything in one tap, set prestige 0-10, or reset. Your profile and settings are saved between launches. |
+| **Progression** | Rank up by playing: the game's own rank scripts award XP for kills, objectives and match bonuses, and the account is saved between launches. **MY RANK** in the **ACCOUNT** tab shows your level and how far the next one is. Or unlock everything in one tap, set prestige 0-10, or reset to level 1. |
 | **Weapon skins** | Paint your gun from the SKINS tab. |
 | **Trickshot toolkit** | Noclip, god mode, **explosive bullets** (every shot also bursts where it lands, so you don't need a perfect hit), save / load a position, spawn at the saved spot, still bot, **BOTS TO 1 HP** (yours is untouched), "next kill wins" final killcam (the match then restarts in place, no loading screen), trickshot search and destroy, 1 HP, ammo refill. Controller shortcut: **hold Select, D-pad left saves, D-pad right loads**. |
 | **Performance controls** | Held to **60 fps** by default to stay cool in long sessions; **FPS 90 / FPS 120** buttons for strong phones. Render resolution and texture quality settings for weaker ones. |

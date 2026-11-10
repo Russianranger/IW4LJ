@@ -322,10 +322,14 @@ const TABS: [Tab; 8] = [
     },
     Tab {
         name: "BOTS",
-        hint: "Bots join the match you are hosting. A still bot never moves or shoots.",
+        hint: "Bots join the match you are hosting. SKILL sets how well every bot aims, reacts and hears, now and for bots added later; it is remembered. A still bot never moves or shoots.",
         items: &[
             line("ADD 1 BOT", "bot add 1"),
             line("ADD 5 BOTS", "bot add 5"),
+            line("SKILL RECRUIT", "bot skill recruit"),
+            line("SKILL REGULAR", "bot skill regular"),
+            line("SKILL HARDENED", "bot skill hardened"),
+            line("SKILL VETERAN", "bot skill veteran"),
             line("ADD STILL BOT", "bot dummy 1"),
             toggle("FREEZE BOTS", 4, "bot hold on", "bot hold off"),
             line("BOTS FIRE", "bot fire all"),
@@ -355,8 +359,9 @@ const TABS: [Tab; 8] = [
     },
     Tab {
         name: "ACCOUNT",
-        hint: "Unlocks are saved from the main menu, not during a match. A new name shows from the next spawn.",
+        hint: "You rank up by playing, as in the original: kills, objectives and the match bonus all count, and MY RANK shows where you stand. UNLOCK ALL jumps to the top rank; RESET LEVEL starts again from level 1. Both are saved from the main menu, not during a match. A new name shows from the next spawn.",
         items: &[
+            line("MY RANK", "rank"),
             Item {
                 label: "CHANGE NAME",
                 act: Act::Prompt(crate::bridge::PROMPT_NAME),
