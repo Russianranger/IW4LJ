@@ -217,6 +217,12 @@ pub trait WorldQuery {
     fn weapon_facts(&self, _weapon: u16) -> Option<WeaponFacts> {
         None
     }
+
+    /// A suppressed weapon is not heard across the map and puts no dot on the
+    /// minimap when it fires.
+    fn weapon_silenced(&self, _weapon: u16) -> bool {
+        false
+    }
 }
 
 /// Counts the collision operations a composite check issues without charging
@@ -267,6 +273,10 @@ impl<W: WorldQuery> WorldQuery for Primitives<'_, W> {
 
     fn weapon_facts(&self, weapon: u16) -> Option<WeaponFacts> {
         self.world.weapon_facts(weapon)
+    }
+
+    fn weapon_silenced(&self, weapon: u16) -> bool {
+        self.world.weapon_silenced(weapon)
     }
 }
 
@@ -356,6 +366,10 @@ impl<W: WorldQuery> WorldQuery for Budgeted<'_, W> {
     fn weapon_facts(&self, weapon: u16) -> Option<WeaponFacts> {
         self.world.weapon_facts(weapon)
     }
+
+    fn weapon_silenced(&self, weapon: u16) -> bool {
+        self.world.weapon_silenced(weapon)
+    }
 }
 
 impl WorldQuery for SimWorld {
@@ -406,7 +420,13 @@ impl WorldQuery for SimWorld {
     }
 
     fn weapon_class(&self, weapon: u16) -> WeaponClass {
-        WeaponClass::from_script_name(self.weapon_script_name(u32::from(weapon)))
+        // The engine's own class covers every weapon the content defines; the
+        // name table only knows the families it was written for.
+        self.weapon_combat_facts(u32::from(weapon))
+            .and_then(|facts| WeaponClass::from_weap_class(facts.weap_class))
+            .unwrap_or_else(|| {
+                WeaponClass::from_script_name(self.weapon_script_name(u32::from(weapon)))
+            })
     }
 
     fn weapon_facts(&self, weapon: u16) -> Option<WeaponFacts> {
@@ -422,7 +442,16 @@ impl WorldQuery for SimWorld {
             quick_drop_time_ms: facts.quick_drop_time_ms,
             reload_time_ms: facts.reload_time_ms,
             reload_empty_time_ms: facts.reload_empty_time_ms,
+            fire_single: facts.fire_type != FULL_AUTO_FIRE_TYPE,
+            fire_time_ms: facts.fire_time_ms,
+            bolt_action: facts.bolt_action,
+            can_ads: facts.aim_down_sight,
         })
+    }
+
+    fn weapon_silenced(&self, weapon: u16) -> bool {
+        self.weapon_script_name(u32::from(weapon))
+            .contains("silencer")
     }
 }
 
@@ -447,6 +476,8 @@ fn hull(hit: trace_iw4::Trace) -> HullTrace {
 
 /// Pistols raise and drop on the quick timings during a weapon change.
 const PISTOL_WEAP_CLASS: i32 = 5;
+/// `weapFireType` 0. Every other type fires once, or one burst, per press.
+const FULL_AUTO_FIRE_TYPE: i32 = 0;
 
 fn classify_shot(outcome: TraceOutcome) -> SightSample {
     match outcome {

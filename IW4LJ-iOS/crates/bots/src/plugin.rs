@@ -11,15 +11,22 @@ use sim::{ClientAction, ClientLifecycle, SimWorld, Tick};
 use crate::nav::{self, NAV_HULL, NAV_SCHEMA, NavGraph, RouteStats};
 use crate::query::{Budgeted, QueryCounters, QuerySubsystem, TraceBudget};
 use crate::roster::{
-    BotAddQueue, BotFireQueue, BotHold, BotRoster, BotTpQueue, BotTpTarget, BotTpWhere,
-    default_class_index,
+    BotAddQueue, BotDifficulty, BotFireQueue, BotHold, BotRoster, BotTpQueue, BotTpTarget,
+    BotTpWhere, default_class_index,
 };
 use crate::sensor;
 use frame::{AuthoritySet, BotNavigationReady, ClientSet, RuntimeRole};
 
 const VIEW_PITCH_DOWN: f32 = 85.0;
-const TRACE_QUOTA: u32 = 96;
+/// Collision queries one think may spend across every bot. A full lobby needs
+/// more than a pair of bots does, or perception starves and bots stop noticing
+/// what is in front of them; the cap keeps a think bounded on a phone.
+const TRACE_QUOTA_BASE: u32 = 80;
+const TRACE_QUOTA_PER_BOT: u32 = 16;
+const TRACE_QUOTA_MAX: u32 = 256;
 const ASTAR_QUOTA: u32 = 2048;
+/// Bots are driven on every second authority tick.
+const THINK_MS: i32 = AUTHORITY_MS * 2;
 /// Ten seconds of authority ticks between aggregates. Compact enough to leave
 /// in a match, coarse enough not to be a per-query log in the hot path.
 const METER_PERIOD_TICKS: u32 = 200;
@@ -103,6 +110,7 @@ impl Plugin for BotsPlugin {
         app.scoped::<BotRoster>(frame::MatchScope::Live)
             .init_resource::<BotAddQueue>()
             .init_resource::<BotHold>()
+            .init_resource::<BotDifficulty>()
             .init_resource::<BotTpQueue>()
             .init_resource::<BotFireQueue>()
             .scoped::<crate::BotPlacements>(frame::MatchScope::Live)
@@ -394,7 +402,11 @@ fn place_bots(
                 angles: placement.angles,
             },
         ) {
-            diag::warn!(Sim, "bots: placement of {} not queued — {error}", placement.id.0);
+            diag::warn!(
+                Sim,
+                "bots: placement of {} not queued — {error}",
+                placement.id.0
+            );
         }
         // A trickshot target dies to any hit: one hit point left.
         let request_id = request_ids.allocate();
@@ -405,7 +417,11 @@ fn place_bots(
                 amount: 99,
             },
         ) {
-            diag::warn!(Sim, "bots: {} left at full health — {error}", placement.id.0);
+            diag::warn!(
+                Sim,
+                "bots: {} left at full health — {error}",
+                placement.id.0
+            );
         }
         false
     });
@@ -512,6 +528,7 @@ struct ThinkBots<'w> {
     actions: ResMut<'w, ClientActionInbox>,
     request_ids: ResMut<'w, net::ActionRequestIds>,
     hold: Res<'w, BotHold>,
+    difficulty: Res<'w, BotDifficulty>,
     fire: ResMut<'w, BotFireQueue>,
     reliable: ResMut<'w, ReliableEventHub>,
     meter: ResMut<'w, BotMeter>,
@@ -547,9 +564,12 @@ fn think_bots(mut p: ThinkBots) {
 
     let snapshot = p.world.0.snapshot(Tick(p.clock.tick.saturating_sub(1)));
     let fires = p.fire.drain();
-    let mut budget = TraceBudget::new(TRACE_QUOTA);
-    let mut astar = ASTAR_QUOTA;
     let count = p.roster.bots.len();
+    let mut budget = TraceBudget::new(
+        (TRACE_QUOTA_BASE + TRACE_QUOTA_PER_BOT * count as u32).min(TRACE_QUOTA_MAX),
+    );
+    let mut astar = ASTAR_QUOTA;
+    let level = p.difficulty.0;
     let start = (p.clock.tick as usize / 2) % count.max(1);
     let mut controller_us = 0u64;
     let seed = p.roster.seed;
@@ -596,20 +616,21 @@ fn think_bots(mut p: ThinkBots) {
                 ..playerstate_iw4::UserCmd::default()
             }
         } else if let Some(brain) = bot.brain.as_mut() {
+            brain.set_skill_level(level);
+            let skill = *brain.skill();
             let mut queried = Budgeted::new(&mut p.world.0, &mut budget);
-            let Some(obs) =
-                sensor::observe_focused(&snapshot, bot.id, &mut queried, brain.focus_target())
-            else {
+            let Some(obs) = sensor::observe_with(
+                &snapshot,
+                bot.id,
+                &mut queried,
+                brain.focus_target(),
+                &skill,
+            ) else {
                 continue;
             };
             let started = std::time::Instant::now();
-            let mut cmd = brain.drive_nav(
-                &obs,
-                &mut queried,
-                Some(&p.nav.graph),
-                &mut astar,
-                AUTHORITY_MS,
-            );
+            let mut cmd =
+                brain.drive_nav(&obs, &mut queried, Some(&p.nav.graph), &mut astar, THINK_MS);
             controller_us += started.elapsed().as_micros() as u64;
             cmd.server_time = p.clock.time_ms;
             cmd
@@ -622,7 +643,16 @@ fn think_bots(mut p: ThinkBots) {
         }) {
             cmd.buttons |= playerstate_iw4::buttons::ATTACK;
         }
-        bot.last_cmd = Some(cmd);
+        // What goes out on the tick between thinks: the same command with the
+        // press-to-act buttons let go, so a semi-automatic fires again on the
+        // next think instead of once per engagement.
+        let mut repeat = cmd;
+        if !p.hold.0
+            && let Some(brain) = bot.brain.as_ref()
+        {
+            repeat.buttons &= !brain.released_between_thinks();
+        }
+        bot.last_cmd = Some(repeat);
         p.cmds.push(bot.id, None, cmd, None);
     }
     if count == 0 {

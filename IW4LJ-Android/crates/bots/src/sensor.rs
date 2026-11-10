@@ -1,19 +1,29 @@
-use math_iw4::angle_vectors;
-use sim::{ClientId, ClientLifecycle, Snapshot};
+use math_iw4::{angle_normalize_360, angle_vectors};
+use sim::{ClientId, ClientLifecycle, RadarMode, Snapshot};
 
 use crate::observation::{
     BotObservation, Contact, DEFAULT_OBJECTIVE_RADIUS, KnowledgeSource, ModeObjective, SelfState,
     Visibility, WeaponAction, WeaponSlot,
 };
 use crate::query::{QuerySubsystem, SightSample, WorldQuery};
+use crate::skill::BotSkill;
 
 pub const SIGHT_RANGE_IN: f32 = 5906.0;
-pub const SIGHT_FOV_DEG: f32 = 90.0;
 const PROBE_CHEST_Z: f32 = 48.0;
 const PROBE_HEAD_Z: f32 = 64.0;
 const PROBE_FEET_Z: f32 = 8.0;
 /// Perception's share of the shared quota, so routing and firing keep theirs.
-const SIGHT_PROBES: u32 = 6;
+const SIGHT_PROBES: u32 = 9;
+/// Inside this an enemy is noticed whichever way the bot faces, given a clear
+/// line: nobody walks up to a player's shoulder unnoticed.
+const CLOSE_AWARE_IN: f32 = 140.0;
+/// Unsuppressed gunfire. It also puts a dot on the minimap, so the position is
+/// known without a line of sight.
+const GUNFIRE_HEAR_IN: f32 = 2800.0;
+/// Running and sprinting footsteps. Crouch-walking and aiming are quieter than
+/// the speed below and are not heard.
+const FOOTSTEP_HEAR_IN: f32 = 260.0;
+const FOOTSTEP_SPEED: f32 = 150.0;
 
 pub fn observe(
     snapshot: &Snapshot,
@@ -31,6 +41,19 @@ pub fn observe_focused(
     bot: ClientId,
     world: &mut impl WorldQuery,
     focus: Option<ClientId>,
+) -> Option<BotObservation> {
+    observe_with(snapshot, bot, world, focus, &BotSkill::default())
+}
+
+/// The full observation: sight inside the skill's field of view, then what the
+/// bot may know without seeing it — gunfire, footsteps, a radar sweep and the
+/// direction it was last hurt from.
+pub fn observe_with(
+    snapshot: &Snapshot,
+    bot: ClientId,
+    world: &mut impl WorldQuery,
+    focus: Option<ClientId>,
+    skill: &BotSkill,
 ) -> Option<BotObservation> {
     let meta = snapshot.meta.for_client(bot)?;
     let ps = snapshot
@@ -56,9 +79,16 @@ pub fn observe_focused(
         ammo_clip: meta.ammo_clip,
         ammo_stock: meta.ammo_stock,
         team,
+        velocity: ps.velocity,
+        ads: ps.f_weapon_pos_frac,
+        damage_event: ps.damage_event,
+        attacker_yaw: attacker_yaw(ps),
+        radar: meta.radar != RadarMode::Off && !meta.radar_blocked,
     };
     let inventory = own_inventory(ps, meta, world);
     let mut seen = Vec::new();
+    let mut heard = Vec::new();
+    let mut gone = Vec::new();
     let mut unsensed = Vec::new();
     if meta.lifecycle != ClientLifecycle::Alive {
         // A bot that is not alive performs no probe, so it makes no negative
@@ -82,7 +112,7 @@ pub fn observe_focused(
                 },
         ];
         let (forward, _, _) = angle_vectors(ps.viewangles);
-        let half = (SIGHT_FOV_DEG * 0.5).to_radians().cos();
+        let half = (skill.fov_deg * 0.5).to_radians().cos();
         // Rotate probes so occluded clients at the front of the snapshot cannot
         // monopolize perception.
         let mut probes = SIGHT_PROBES;
@@ -96,15 +126,30 @@ pub fn observe_focused(
             let Some(other_meta) = snapshot.meta.for_client(*id) else {
                 continue;
             };
-            if other_meta.lifecycle != ClientLifecycle::Alive {
-                continue;
-            }
             if snapshot.meta.kind.is_team() && other_meta.client_state_team == team {
                 continue;
             }
+            if other_meta.lifecycle != ClientLifecycle::Alive {
+                gone.push(*id);
+                continue;
+            }
+            let range2 = dist2(ps.origin, other.origin);
+            let heard_as = Contact {
+                id: *id,
+                origin: other.origin,
+                source: KnowledgeSource::Heard,
+                seen_tick: snapshot.tick.0,
+                confidence: 0.5,
+                height: other.view_height_current,
+            };
             // Out of range or outside the cone is a complete answer on its own;
             // only a client that needed a probe it did not get is unsensed.
-            if !in_range_and_fov(ps.origin, other.origin, forward, half) {
+            if range2 > CLOSE_AWARE_IN * CLOSE_AWARE_IN
+                && !in_range_and_fov(ps.origin, other.origin, forward, half)
+            {
+                if placed_unseen(world, self_state.radar, other, range2, skill.hearing) {
+                    heard.push(heard_as);
+                }
                 continue;
             }
             if probes == 0 {
@@ -113,13 +158,15 @@ pub fn observe_focused(
             }
             match probe_visible(world, bot, eye, other.origin, *id, &mut probes) {
                 Visibility::Seen => seen.push(Contact {
-                    id: *id,
-                    origin: other.origin,
                     source: KnowledgeSource::CurrentlySeen,
-                    seen_tick: snapshot.tick.0,
                     confidence: 1.0,
+                    ..heard_as
                 }),
-                Visibility::NotSeen => {}
+                Visibility::NotSeen => {
+                    if placed_unseen(world, self_state.radar, other, range2, skill.hearing) {
+                        heard.push(heard_as);
+                    }
+                }
                 Visibility::Unknown => unsensed.push(*id),
             }
         }
@@ -131,6 +178,8 @@ pub fn observe_focused(
         self_state,
         inventory,
         seen,
+        heard,
+        gone,
         unsensed,
         events: Vec::new(),
         objective: objectives
@@ -139,6 +188,60 @@ pub fn observe_focused(
             .min_by(|a, b| dist2(ps.origin, a.origin).total_cmp(&dist2(ps.origin, b.origin))),
         objectives,
     })
+}
+
+fn placed_unseen(
+    world: &impl WorldQuery,
+    radar: bool,
+    other: &playerstate_iw4::PlayerState,
+    range2: f32,
+    hearing: f32,
+) -> bool {
+    let firing = WeaponAction::from_weaponstate(other.weaponstate_primary) == WeaponAction::Firing;
+    audible(
+        radar,
+        firing && !world.weapon_silenced(other.weapon as u16),
+        other.velocity[0] * other.velocity[0] + other.velocity[1] * other.velocity[1],
+        range2,
+        hearing,
+    )
+}
+
+/// Whether an enemy that is not in sight is still placed: by a radar sweep, by
+/// firing a weapon without a suppressor, or by running close enough to hear.
+/// Ranges and speed are squared.
+pub(crate) fn audible(
+    radar: bool,
+    loud_fire: bool,
+    speed2: f32,
+    range2: f32,
+    hearing: f32,
+) -> bool {
+    if radar {
+        return true;
+    }
+    let gunfire = GUNFIRE_HEAR_IN * hearing;
+    if loud_fire && range2 <= gunfire * gunfire {
+        return true;
+    }
+    let steps = FOOTSTEP_HEAR_IN * hearing;
+    range2 <= steps * steps && speed2 >= FOOTSTEP_SPEED * FOOTSTEP_SPEED
+}
+
+fn attacker_yaw(ps: &playerstate_iw4::PlayerState) -> Option<f32> {
+    bearing_to_attacker(ps.damage_yaw, ps.damage_pitch)
+}
+
+/// World yaw from the bot toward the source of its last directional damage.
+/// The player state stores the direction the damage travelled, packed to a
+/// byte; 255/255 is the engine's marker for damage with no direction.
+pub(crate) fn bearing_to_attacker(damage_yaw: u32, damage_pitch: u32) -> Option<f32> {
+    if damage_yaw == 255 && damage_pitch == 255 {
+        return None;
+    }
+    Some(angle_normalize_360(
+        damage_yaw as f32 * (360.0 / 256.0) + 180.0,
+    ))
 }
 
 fn in_range_and_fov(from: [f32; 3], to: [f32; 3], forward: [f32; 3], min_dot: f32) -> bool {

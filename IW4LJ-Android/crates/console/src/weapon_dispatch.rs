@@ -571,7 +571,8 @@ struct BotCompleter(CompletionSlot);
 
 impl ArgCompleter for BotCompleter {
     fn complete(&self, prefix: &str) -> Vec<String> {
-        StaticCompleter::new(["add", "dummy", "hold", "give", "fire", "tp"]).complete(prefix)
+        StaticCompleter::new(["add", "dummy", "skill", "hold", "give", "fire", "tp"])
+            .complete(prefix)
     }
     fn complete_with_context(&self, prefix: &str, args: &[&str]) -> Vec<String> {
         let Some(verb) = args.first() else {
@@ -582,6 +583,9 @@ impl ArgCompleter for BotCompleter {
                 StaticCompleter::new((1..=16).map(|n| n.to_string())).complete(prefix)
             }
             ("hold", 1) => StaticCompleter::new(["on", "off"]).complete(prefix),
+            ("skill", 1) => {
+                StaticCompleter::new(["recruit", "regular", "hardened", "veteran"]).complete(prefix)
+            }
             ("give" | "fire" | "tp", 1) => {
                 let mut ids = self
                     .0
