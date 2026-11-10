@@ -65,6 +65,17 @@ impl LocalPlayerData {
             )
     }
 
+    /// The experience at which the next rank begins. `None` at the top rank,
+    /// and before the account and the rank table are both installed.
+    pub fn next_rank_xp(&self) -> Option<i32> {
+        let rank = self.progression.as_ref()?.rank;
+        self.ranks
+            .thresholds()
+            .iter()
+            .find(|&&(next, _)| next == rank + 1)
+            .map(|&(_, xp)| xp)
+    }
+
     pub fn unlock_data_ready(&self) -> bool {
         self.definition.is_some() && self.defaults.is_some() && self.challenges.is_some()
     }

@@ -128,19 +128,21 @@ fn main() {
         {
             std::env::set_var("IW4L_TEXTURE_SKIP", skip.trim());
         }
-        // A phone has no console to type into, so maximum progression is the
-        // default script. Bots are never automatic: a 1v1 LAN is the point, so
-        // they are a mod-menu action. A `cmds.txt` dragged in beside the game,
-        // or `IW4L_CMDS`, overrides it; a script is how a match is started
-        // without the menus.
-        if std::env::var_os("IW4L_CMDS").is_none() {
-            let script = [&media, &files]
+        // A `cmds.txt` dragged in beside the game, or `IW4L_CMDS`, is the
+        // startup script: it is how a match is started without the menus. With
+        // neither there is no script, and the account ranks up by playing.
+        // Maximum progression is the mod menu's UNLOCK ALL, a choice and not a
+        // default: run on every launch it put the account back at the top rank
+        // each time, so nothing earned in a match could ever show. Bots are
+        // never automatic either: a 1v1 LAN is the point.
+        if std::env::var_os("IW4L_CMDS").is_none()
+            && let Some(script) = [&media, &files]
                 .into_iter()
                 .find_map(|base| std::fs::read_to_string(base.join("cmds.txt")).ok())
                 .filter(|text| !text.trim().is_empty())
                 // The same test's startup script (see above).
                 .filter(|text| !text.contains("map mp_terminal; wait world; spawn 0; force_match_start; bot add 1"))
-                .unwrap_or_else(|| "wait progression; unlock all".to_owned());
+        {
             std::env::set_var("IW4L_CMDS", script);
         }
         // A `.iw4l-server` descriptor dropped next to the game selects the

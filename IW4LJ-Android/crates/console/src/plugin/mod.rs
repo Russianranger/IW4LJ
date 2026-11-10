@@ -800,6 +800,12 @@ fn setup_console(
                 .usage("prestige <0-10> — save a prestige level, keeping rank and unlocks (main menu)"),
         );
     }
+    if registry.resolve("rank").is_none() {
+        registry.register(
+            crate::CommandSpec::new("rank")
+                .usage("rank — show your level, experience and how far the next level is"),
+        );
+    }
     if registry.resolve("unlock").is_none() {
         registry.register(
             crate::CommandSpec::new("unlock")

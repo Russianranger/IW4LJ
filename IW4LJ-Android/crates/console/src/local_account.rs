@@ -171,8 +171,23 @@ pub(crate) fn route_unlock_commands(
     let mut account = account;
     for command in commands
         .read()
-        .filter(|command| matches!(command.name.as_str(), "unlock" | "prestige"))
+        .filter(|command| matches!(command.name.as_str(), "unlock" | "prestige" | "rank"))
     {
+        // Reading the rank edits nothing, so it answers anywhere, mid-match
+        // included: that is where a player wants to know how far the next
+        // level is.
+        if command.name == "rank" {
+            echo.write(match player_data.progression.as_ref() {
+                Some(progression) => rank_line(
+                    progression.rank,
+                    progression.prestige,
+                    progression.experience,
+                    player_data.next_rank_xp(),
+                ),
+                None => "rank: progression is still loading".to_owned(),
+            });
+            continue;
+        }
         let mut prestige = None;
         let unlock = match (command.name.as_str(), command.args.as_slice()) {
             ("unlock", [mode]) if mode == "all" => true,
@@ -261,6 +276,25 @@ pub(crate) fn route_unlock_commands(
             }
             Err(error) => echo.write(format!("unlock: {error}")),
         }
+    }
+}
+
+/// One line for the console and the mod menu. Ranks are stored from zero; a
+/// player counts them from one.
+fn rank_line(rank: u32, prestige: i32, experience: i32, next: Option<i32>) -> String {
+    let level = rank + 1;
+    let prestige = if prestige > 0 {
+        format!(", prestige {prestige}")
+    } else {
+        String::new()
+    };
+    match next {
+        Some(next) => format!(
+            "rank: level {level}{prestige}, {experience} XP, {} to level {}",
+            (next - experience).max(0),
+            level + 1
+        ),
+        None => format!("rank: level {level}{prestige}, {experience} XP, top rank"),
     }
 }
 

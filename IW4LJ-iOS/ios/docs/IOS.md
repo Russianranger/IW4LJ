@@ -43,7 +43,7 @@ Documents/mw2/zone/...        the MW2 multiplayer install (not backed up)
 Documents/mw2/main/...
 Documents/iw4l-artifacts/     caches, logs, demos (not backed up)
 Documents/*.iw4l-server       a community descriptor for online play
-Documents/cmds.txt            startup console script (default: unlock all)
+Documents/cmds.txt            startup console script (default: none)
 Documents/env.txt             NAME=value tuning switches
 Documents/*.txt               settings written by the mod menu
 ```
