@@ -20,7 +20,7 @@ Branch `repair/thor-startup` starts at `fd839ab18ee98925a9e495f47036c15dd493d84f
 
 ## Current test release
 
-Version `0.2.2-thor.2` (`20000002`) builds [`df67558414878a933733add59d69acf754540eb8`](https://github.com/Russianranger/IW4LJ/commit/df67558414878a933733add59d69acf754540eb8). It uses the same test package, storage and signing identity as `thor.1`. A fresh install can coexist with upstream IW4LJ. An installation over `thor.1` preserves its files and startup reports. [Native build](https://github.com/Russianranger/IW4LJ/actions/runs/42723202427) · [Android emulator tests](https://github.com/Russianranger/IW4LJ/actions/runs/42723875003)
+Version `0.2.2-thor.2` (`20000002`) builds [`df67558414878a933733add59d69acf754540eb8`](https://github.com/Russianranger/IW4LJ/commit/df67558414878a933733add59d69acf754540eb8). It uses the same test package, storage and signing identity as `thor.1`. A fresh install can coexist with upstream IW4LJ. An installation over `thor.1` preserves its files and startup reports. [Native build](https://github.com/Russianranger/IW4LJ/actions/runs/42723202427) · [Signed publication](https://github.com/Russianranger/IW4LJ/actions/runs/42725023326) · [Android emulator tests](https://github.com/Russianranger/IW4LJ/actions/runs/42723875003)
 
 [Download the signed APK](https://github.com/Russianranger/IW4LJ/releases/download/thor-test-df6755841487/IW4LJ-Thor.apk) · [Release, matching native symbols and checksums](https://github.com/Russianranger/IW4LJ/releases/tag/thor-test-df6755841487)
 
@@ -42,6 +42,10 @@ On the accelerated Android 13 Google APIs image (API 33, Google r15 archive, `li
 - A native attempt with a readable FastFile and an IWD missing its font image reported the exact path. The launcher stayed alive and enabled retry. Adding a valid alternate installation let the engine reject the incomplete preferred copy and load the alternate.
 - The engine drew its IW4 dashboard text to the primary surface. Home and return resumed the same engine process and attempt. A second cold start reached another presented menu frame.
 - The API 31 emulator in the same workflow failed during Vulkan buffer creation. Its driver advertised a maximum buffer size of zero and rejected even a 16-byte uniform. The original GPU error and ensuing panic are in its report. This remains a limitation of that tested configuration. [Android 12 job](https://github.com/Russianranger/IW4LJ/actions/runs/42723875003/job/129524397234)
+
+The target emulator entered winit at 1.80 s after native entry, started its first update at 1.96 s, and presented the dashboard text at 5.95 s. A second cold start presented at 4.77 s. These timings are for the small synthetic fixture on SwiftShader. The screenshot shows the resumed emulator surface. The fixture contains menu labels and a font atlas, with placeholder text for absent supplemental assets.
+
+![IW4 dashboard on Android 13 after Home and return](images/thor-api33-synthetic-menu.png)
 
 ## First candidate and regression evidence
 
