@@ -1190,6 +1190,17 @@ fn preflight_match_install(
     {
         script_dvars.push(("onlinegame".into(), "1".into()));
     }
+    // The rank script multiplies every kill, assist and objective award by
+    // `scr_xpscale`, and its stock value is 1. Nothing here registers script
+    // dvars with defaults, so one the match config never mentions reads as 0,
+    // and at 0 only the end-of-match bonus would ever reach the account. A
+    // host rule can still override it below.
+    if !script_dvars
+        .iter()
+        .any(|(name, _)| name.eq_ignore_ascii_case("scr_xpscale"))
+    {
+        script_dvars.push(("scr_xpscale".into(), "1".into()));
+    }
     script_dvars.push(("mapname".into(), zone.to_owned()));
     script_dvars.push(("g_gametype".into(), gametype.to_owned()));
     script_dvars.push(("sv_maxclients".into(), "18".into()));

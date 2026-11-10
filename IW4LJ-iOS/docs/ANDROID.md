@@ -60,9 +60,9 @@ MP/campaign split to make — the Android build is already the MP build.
   pad's axes, so the activity reads the pad and the JNI bridge writes the state
   the plugin turns into the same synthetic keys and mouse.
 - **Immersive fullscreen** (same activity): the system bars are hidden on focus.
-- **M5 defaults** (`crates/android`, `crates/touch`): `unlock all` when
-  progression loads; the `MODS` overlay for everything else. Bots are opt-in on
-  purpose so a 1v1 LAN is not spoiled.
+- **M5 defaults** (`crates/android`, `crates/touch`): no startup script unless
+  `cmds.txt` supplies one, so the account ranks up by playing; `unlock all` is a
+  mod-menu button. Bots are opt-in on purpose so a 1v1 LAN is not spoiled.
 - **Community selection on Android** (`crates/android`): the entry calls
   `updater::startup()` so a `.iw4l-server` descriptor in the files directory is
   selected. Without that call `master_target()` sees no community and networking
@@ -80,9 +80,10 @@ MP/campaign split to make — the Android build is already the MP build.
   already enables everything the adapter reports). Verify a map draws on device.
 - **M4 touch** — done in code (`crates/touch`): a virtual pad that presses the
   bound keys and mouse and emits look deltas. Verify on device.
-- **M5 features** — the phone auto-runs `unlock all` once progression loads (and
-  nothing else: a 1v1 LAN against a friend is the point, so **bots are never
-  automatic**). A touch **mod menu** (`crates/touch`, the `MODS` button) runs
+- **M5 features** — the phone runs nothing at launch (it used to run
+  `unlock all`, which reset the account to the top rank every time; a 1v1 LAN
+  against a friend is the point, so **bots are never automatic** either). A
+  touch **mod menu** (`crates/touch`, the `MODS` button) runs
   the console lines on demand — unlock all / reset level / add bots / start
   match / spawn. LAN needs the IW4L master on the same network: run `iw4l-master`,
   drop its `.iw4l-server` descriptor in the app files directory, and both phones

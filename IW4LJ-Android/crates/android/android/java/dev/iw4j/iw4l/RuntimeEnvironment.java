@@ -45,7 +45,10 @@ final class RuntimeEnvironment {
                 break;
             }
         }
-        Os.setenv("IW4L_CMDS", "wait progression; unlock all", false);
+        // No default script. `unlock all` used to run here on every launch,
+        // which put the account back at the top rank each time, so nothing
+        // earned in a match could show. It is a mod-menu button now, and a
+        // cmds.txt can still ask for it.
         for (File base : dirs) {
             File[] descriptors = base.listFiles((dir, name) ->
                 name.toLowerCase(Locale.ROOT).endsWith(".iw4l-server"));
