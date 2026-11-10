@@ -15,8 +15,9 @@ impl Memory {
     /// Folds one observation in and reports the transitions it caused.
     pub fn ingest(&mut self, obs: &BotObservation) -> Vec<BotEvent> {
         let mut events = Vec::new();
-        self.contacts
-            .retain(|c| obs.tick.saturating_sub(c.seen_tick) <= MEMORY_TTL_TICKS);
+        self.contacts.retain(|c| {
+            obs.tick.saturating_sub(c.seen_tick) <= MEMORY_TTL_TICKS && !obs.gone.contains(&c.id)
+        });
         for row in &mut self.contacts {
             if row.source != KnowledgeSource::CurrentlySeen
                 || obs.seen.iter().any(|s| s.id == row.id)
@@ -41,6 +42,19 @@ impl Memory {
             } else {
                 events.push(BotEvent::Spotted { id: seen.id });
                 self.contacts.push(*seen);
+            }
+        }
+        // A sound moves a remembered position; it never becomes a sighting, so
+        // it cannot authorize a shot or count as a spotted event.
+        for heard in &obs.heard {
+            let row = Contact {
+                source: KnowledgeSource::LastSeen,
+                ..*heard
+            };
+            match self.contacts.iter_mut().find(|c| c.id == heard.id) {
+                Some(known) if known.source == KnowledgeSource::CurrentlySeen => {}
+                Some(known) => *known = row,
+                None => self.contacts.push(row),
             }
         }
         events

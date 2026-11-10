@@ -89,7 +89,13 @@ impl WeaponSkill {
 
     /// One decision slice. `allow_start` is the caller's veto: an interaction
     /// close to completion is not displaced merely because a magazine is empty.
-    pub fn update(&mut self, obs: &BotObservation, allow_start: bool) -> WeaponStatus {
+    /// `tactical` lets a quiet moment top up a part-used magazine.
+    pub fn update(
+        &mut self,
+        obs: &BotObservation,
+        allow_start: bool,
+        tactical: bool,
+    ) -> WeaponStatus {
         if let Some(mut commitment) = self.commitment {
             let outcome = commitment.progress(obs);
             self.commitment = Some(commitment);
@@ -108,7 +114,7 @@ impl WeaponSkill {
         if !allow_start || obs.tick < self.retry_after_tick {
             return self.status;
         }
-        let Some(act) = choose(obs) else {
+        let Some(act) = choose(obs, tactical) else {
             return self.status;
         };
         self.commitment = Some(Commitment::begin(act, obs));
@@ -205,10 +211,28 @@ fn held_slot(obs: &BotObservation) -> WeaponSlot {
 /// Combat equipment needs attention when the held magazine is empty. Reloading
 /// and switching are then compared on the simulator's own timings, with a
 /// visible threat deciding whether speed outranks keeping the current gun.
-fn choose(obs: &BotObservation) -> Option<WeaponAct> {
+///
+/// A magazine down to its last third is topped up as well, but only on request
+/// and only with nothing in sight: a reload started in the open is how a fight
+/// is lost. The caller asks only while it is travelling, not while it is
+/// fighting, backing off or closing on a sound.
+fn choose(obs: &BotObservation, tactical: bool) -> Option<WeaponAct> {
     let me = &obs.self_state;
-    if !me.weapon_action.is_settled() || me.ammo_clip > 0 {
+    if !me.weapon_action.is_settled() {
         return None;
+    }
+    if me.ammo_clip > 0 {
+        let low = obs.held().is_some_and(|slot| {
+            slot.facts.selectable
+                && slot.facts.clip_size > 1
+                && me.ammo_clip * 3 <= slot.facts.clip_size
+        });
+        return (tactical
+            && low
+            && obs.seen.is_empty()
+            && me.ammo_stock > 0
+            && me.weapon_action == WeaponAction::Ready)
+            .then_some(WeaponAct::Reload);
     }
     let held = held_slot(obs);
     // An offhand or an item in hand is not a readiness decision.
@@ -219,7 +243,13 @@ fn choose(obs: &BotObservation) -> Option<WeaponAct> {
     let switch = obs
         .inventory
         .iter()
-        .filter(|slot| slot.weapon != me.weapon && slot.is_loaded_gun())
+        // A launcher is not a sidearm: most need a lock, and the rest kill
+        // their owner at the range a magazine runs dry.
+        .filter(|slot| {
+            slot.weapon != me.weapon
+                && slot.is_loaded_gun()
+                && slot.class != crate::observation::WeaponClass::Launcher
+        })
         .map(|slot| (slot.switch_ms(&held), slot.weapon))
         .min();
     match (switch, reload_ms) {

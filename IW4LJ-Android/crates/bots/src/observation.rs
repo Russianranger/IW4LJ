@@ -23,6 +23,8 @@ impl Stance {
 pub enum KnowledgeSource {
     CurrentlySeen,
     LastSeen,
+    /// Placed by sound, the minimap or a UAV sweep: where, never a line of fire.
+    Heard,
     PublicMode,
 }
 
@@ -33,6 +35,21 @@ pub struct Contact {
     pub source: KnowledgeSource,
     pub seen_tick: u32,
     pub confidence: f32,
+    /// The contact's eye height when it was observed; `0.0` when unknown.
+    pub height: f32,
+}
+
+impl Contact {
+    /// Where to put the sights: the upper chest of whatever stance the contact
+    /// was seen in, so a crouched or prone enemy is not shot over.
+    pub fn aim_point(&self) -> [f32; 3] {
+        let height = if self.height > 1.0 { self.height } else { 60.0 };
+        [
+            self.origin[0],
+            self.origin[1],
+            self.origin[2] + (height * 0.8).clamp(10.0, 52.0),
+        ]
+    }
 }
 
 /// What perception established about one client this tick. `NotSeen` is an
@@ -53,17 +70,65 @@ pub enum WeaponClass {
     Lmg,
     Sniper,
     Shotgun,
+    Pistol,
+    Launcher,
 }
 
 impl WeaponClass {
+    /// The range this weapon wants to fight at. Inside it the bot stops closing
+    /// and trades shots; firing positions are picked in a band around it.
     pub fn fight_hold(self) -> f32 {
         match self {
-            Self::Sniper => 360.0,
-            Self::Lmg => 220.0,
-            Self::Assault => 160.0,
-            Self::Smg => 112.0,
-            Self::Shotgun => 72.0,
+            Self::Sniper => 1500.0,
+            Self::Lmg => 800.0,
+            Self::Assault => 700.0,
+            Self::Launcher => 600.0,
+            Self::Smg => 420.0,
+            Self::Pistol => 380.0,
+            Self::Shotgun => 220.0,
         }
+    }
+
+    /// The furthest range worth standing and shooting from. Past it the weapon
+    /// is not winning the exchange, so the bot closes the distance instead.
+    pub fn engage_max(self) -> f32 {
+        match self {
+            Self::Sniper => 6000.0,
+            Self::Lmg => 2200.0,
+            Self::Assault => 1800.0,
+            Self::Launcher => 1500.0,
+            Self::Smg => 1100.0,
+            Self::Pistol => 900.0,
+            Self::Shotgun => 450.0,
+        }
+    }
+
+    /// Range beyond which the sights come up. Closer than this the hip is
+    /// faster; a shotgun never aims, a sniper always does.
+    pub fn ads_min(self) -> f32 {
+        match self {
+            Self::Sniper | Self::Launcher => 0.0,
+            Self::Assault => 300.0,
+            Self::Lmg => 350.0,
+            Self::Pistol => 380.0,
+            Self::Smg => 420.0,
+            Self::Shotgun => f32::INFINITY,
+        }
+    }
+
+    /// The engine's own `weapClass`, which every weapon carries. Offhands,
+    /// turrets and items are not fighting classes and return `None`.
+    pub fn from_weap_class(weap_class: i32) -> Option<Self> {
+        Some(match weap_class {
+            0 => Self::Assault,
+            1 => Self::Sniper,
+            2 => Self::Lmg,
+            3 => Self::Smg,
+            4 => Self::Shotgun,
+            5 => Self::Pistol,
+            7 => Self::Launcher,
+            _ => return None,
+        })
     }
 
     pub fn from_script_name(name: &str) -> Self {
@@ -85,12 +150,12 @@ impl WeaponClass {
             UniqueGroup::Sniper => Self::Sniper,
             UniqueGroup::Lmg => Self::Lmg,
             UniqueGroup::Shotgun => Self::Shotgun,
-            UniqueGroup::Smg | UniqueGroup::MachinePistol | UniqueGroup::Pistol => Self::Smg,
-            UniqueGroup::Assault
-            | UniqueGroup::Riot
-            | UniqueGroup::Projectile
-            | UniqueGroup::Cqb
-            | UniqueGroup::Special => Self::Assault,
+            UniqueGroup::Smg | UniqueGroup::MachinePistol => Self::Smg,
+            UniqueGroup::Pistol => Self::Pistol,
+            UniqueGroup::Projectile => Self::Launcher,
+            UniqueGroup::Assault | UniqueGroup::Riot | UniqueGroup::Cqb | UniqueGroup::Special => {
+                Self::Assault
+            }
         }
     }
 }
@@ -143,6 +208,13 @@ pub struct WeaponFacts {
     pub quick_drop_time_ms: i32,
     pub reload_time_ms: i32,
     pub reload_empty_time_ms: i32,
+    /// Anything but full auto: the trigger has to come up between shots (or
+    /// bursts), so a held button fires once.
+    pub fire_single: bool,
+    pub fire_time_ms: i32,
+    pub bolt_action: bool,
+    /// The weapon has sights to raise.
+    pub can_ads: bool,
 }
 
 /// One owned weapon with the ammunition the match state holds for it.
@@ -196,6 +268,16 @@ pub struct SelfState {
     pub ammo_clip: i32,
     pub ammo_stock: i32,
     pub team: i32,
+    pub velocity: [f32; 3],
+    /// How far the sights are up, 0 at the hip to 1 fully aimed.
+    pub ads: f32,
+    /// Counts up each time the bot takes damage.
+    pub damage_event: u32,
+    /// World yaw from the bot toward whatever last hurt it, when the hit had a
+    /// direction. The same fact the damage indicator draws for a player.
+    pub attacker_yaw: Option<f32>,
+    /// The bot's team has a radar sweep running.
+    pub radar: bool,
 }
 
 pub const DEFAULT_OBJECTIVE_RADIUS: f32 = 96.0;
@@ -265,6 +347,12 @@ pub struct BotObservation {
     /// The bot's own carried weapons. Enemy inventories are never projected.
     pub inventory: Vec<WeaponSlot>,
     pub seen: Vec<Contact>,
+    /// Enemies placed without a line of sight: unsuppressed gunfire, footsteps
+    /// close by, a UAV sweep. A position to go and look at, never a target.
+    pub heard: Vec<Contact>,
+    /// Enemies that are in the match but not alive. A remembered position for
+    /// one of them is the position of a body.
+    pub gone: Vec<ClientId>,
     /// Clients perception did not finish evaluating this tick, because its
     /// allowance ran out, a query was denied, or a trace came back
     /// unclassified. A client in neither `seen` nor here was evaluated and not

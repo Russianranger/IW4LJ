@@ -2,6 +2,7 @@ use bevy::prelude::Resource;
 use sim::{ClientId, LifeSequence};
 
 use crate::controller::HostController;
+use crate::skill::SkillLevel;
 
 pub const MAX_HOST_BOTS: u32 = 20;
 
@@ -127,6 +128,43 @@ impl BotAddQueue {
 
 #[derive(Resource, Debug, Default, Clone, Copy)]
 pub struct BotHold(pub bool);
+
+/// The difficulty every bot plays at. It outlives the match, so the choice
+/// carries across a map change, and it is written beside the quick-start file
+/// so it carries across a launch as well. `IW4L_BOT_SKILL` overrides the file.
+#[derive(Resource, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BotDifficulty(pub SkillLevel);
+
+impl Default for BotDifficulty {
+    fn default() -> Self {
+        let saved = std::env::var("IW4L_BOT_SKILL")
+            .ok()
+            .or_else(|| skill_path().and_then(|path| std::fs::read_to_string(path).ok()));
+        Self(
+            saved
+                .as_deref()
+                .and_then(SkillLevel::from_token)
+                .unwrap_or_default(),
+        )
+    }
+}
+
+impl BotDifficulty {
+    /// Changes the level and remembers it. A write that fails only costs the
+    /// memory of the choice, so it is reported and not treated as an error.
+    pub fn set(&mut self, level: SkillLevel) {
+        self.0 = level;
+        if let Some(path) = skill_path()
+            && let Err(error) = std::fs::write(&path, level.label())
+        {
+            diag::warn!(Sim, "bots: skill not saved to {}: {error}", path.display());
+        }
+    }
+}
+
+fn skill_path() -> Option<std::path::PathBuf> {
+    std::env::var_os("HOME").map(|home| std::path::PathBuf::from(home).join("bot_skill.txt"))
+}
 
 /// Bots waiting to be stood where they were asked to be. A bot is not alive
 /// the moment it is minted, and a move is refused until it is.
@@ -298,10 +336,16 @@ impl BotRoster {
     }
 }
 
+/// The default classes a bot is given, by how often. The simulation maps the
+/// index onto the mode's five defaults; the fifth is the riot shield, which a
+/// bot can carry but not fight with, so it is left out. Rifles and submachine
+/// guns lead, with fewer machine guns and the odd sniper.
+const BOT_CLASS_INDICES: [u8; 9] = [0, 0, 0, 1, 1, 1, 2, 2, 3];
+
 pub fn default_class_index(seed: u64, client: ClientId, pick: u32) -> u8 {
     let mix = seed
         .wrapping_mul(0x9E37_79B9_7F4A_7C15)
         .wrapping_add(u64::from(client.0).wrapping_mul(0xBF58_476D_1CE4_E5B9))
         .wrapping_add(u64::from(pick).wrapping_mul(0x94D0_49BB_1331_11EB));
-    (mix >> 33) as u8
+    BOT_CLASS_INDICES[((mix >> 33) % BOT_CLASS_INDICES.len() as u64) as usize]
 }

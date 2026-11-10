@@ -8,7 +8,10 @@ mod plugin;
 mod query;
 mod roster;
 mod sensor;
+mod skill;
 mod task;
+#[cfg(test)]
+mod tests;
 pub mod unique_loadout;
 mod weapon;
 
@@ -30,10 +33,10 @@ pub use query::{
     SightSample, TraceBudget, WalkSample, WorldQuery,
 };
 pub use roster::{
-    BotAddQueue, BotAddRequest, BotFireQueue, BotHold, BotPlacement, BotPlacements, BotRoster,
-    BotSide, BotTpQueue,
-    BotTpRequest, BotTpTarget, BotTpWhere, MAX_HOST_BOTS,
+    BotAddQueue, BotAddRequest, BotDifficulty, BotFireQueue, BotHold, BotPlacement, BotPlacements,
+    BotRoster, BotSide, BotTpQueue, BotTpRequest, BotTpTarget, BotTpWhere, MAX_HOST_BOTS,
 };
-pub use sensor::{observe, observe_focused};
+pub use sensor::{observe, observe_focused, observe_with};
+pub use skill::{BotSkill, SkillLevel};
 pub use task::{ActionStage, Decision, SwitchReason, Task, TaskKind};
 pub use weapon::{WeaponAct, WeaponFailure, WeaponSkill, WeaponStatus};

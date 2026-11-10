@@ -1,18 +1,18 @@
-use playerstate_iw4::UserCmd;
+use playerstate_iw4::{UserCmd, buttons};
 use sim::{ClientId, ClientLifecycle};
 
-use crate::intent::{BotIntent, MotorReport, MoveMode, PathOutcome};
+use crate::intent::{BotIntent, DEFAULT_FIRE_CONE_DEG, MotorReport, MoveMode, PathOutcome};
 use crate::memory::Memory;
 use crate::motor::Motor;
 use crate::nav::{self, NavGraph, PathError};
 use crate::observation::{
-    BotEvent, BotObservation, Contact, KnowledgeSource, ModeObjective, ObjectiveAction, TeamRole,
+    BotObservation, Contact, KnowledgeSource, ModeObjective, ObjectiveAction, TeamRole,
 };
 use crate::query::{QueryResult, QuerySubsystem, SightSample, WalkSample, WorldQuery};
+use crate::skill::{BotSkill, SkillLevel};
 use crate::task::{ActionStage, Decision, SwitchReason, Task, TaskKind};
 use crate::weapon::WeaponSkill;
 
-const THINK_PERIOD_TICKS: u32 = 2;
 const SWITCH_MARGIN: f32 = 12.0;
 const STEP_IN: f32 = 64.0;
 const WAYPOINT_IN: f32 = 24.0;
@@ -35,9 +35,36 @@ const FIGHT_SCAN_MAX_AGE_TICKS: u32 = 8;
 const FIGHT_COMMIT_MAX_AGE_TICKS: u32 = 60;
 /// Commanded movement without displacement for this long is a stuck bot.
 const STUCK_TICKS: u32 = 40;
+/// How long the last place an enemy was seen or heard stays worth walking to.
+const HOTSPOT_TTL_TICKS: u32 = 400;
+/// Newer word of an enemy has to beat the current roam goal's by this much
+/// before the bot turns round for it.
+const HOTSPOT_REDIRECT_TICKS: u32 = 20;
+/// How long a place or a contact the bot found no route to is left alone.
+/// Without it an enemy heard from somewhere unreachable is walked at, given up
+/// on and walked at again for as long as the noise lasts.
+const NO_ROUTE_BACKOFF_TICKS: u32 = 200;
+/// How long a bot faces the direction it was hurt from, and how far out along
+/// that bearing it looks. Sight then has to find the attacker; nothing here
+/// knows who or where they are.
+const ALERT_TICKS: u32 = 30;
+const ALERT_LOOK_IN: f32 = 600.0;
+/// Route points ahead of the bot it looks toward while travelling, so it faces
+/// round a corner before it turns it.
+const LOOK_AHEAD_STEPS: usize = 4;
+/// Inside this the knife is faster than the gun.
+const MELEE_RANGE_IN: f32 = 56.0;
+/// Automatic fire past this range goes out in bursts.
+const BURST_RANGE_IN: f32 = 900.0;
+/// One side-step of a strafe, and how long a leg lasts before the next.
+const STRAFE_STEP_IN: f32 = 72.0;
+const STRAFE_LEG_TICKS: u32 = 10;
 
 #[derive(Clone, Debug)]
 pub struct HostController {
+    seed: u64,
+    rng: u64,
+    skill: BotSkill,
     aggression: f32,
     self_preserve: f32,
     memory: Memory,
@@ -58,8 +85,27 @@ pub struct HostController {
     nav_key: Option<(u64, u64, u32, u32)>,
     roam: Option<[f32; 3]>,
     roam_gen: u32,
+    /// The tick of the knowledge the current roam goal came from; `None` for a
+    /// goal picked at random.
+    roam_tick: Option<u32>,
+    /// The current roam goal is a hotspot and not a random node.
+    roam_hot: bool,
+    /// The last place an enemy was seen or heard, and when. Where a bot with
+    /// nothing in sight goes to look.
+    hotspot: Option<([f32; 3], u32)>,
+    /// Whose position the hotspot is, so it can be dropped when they die.
+    hotspot_of: Option<ClientId>,
+    /// The remembered contact the investigate task walks to.
+    investigate: Option<Contact>,
+    /// A contact no route was found to, and the tick it may be tried again.
+    investigate_block: Option<(ClientId, u32)>,
+    /// A point to face after being hurt from out of sight, and when it lapses.
+    alert: Option<([f32; 3], u32)>,
+    damage_event: Option<u32>,
+    /// The live strafe leg: where it ends and the tick it is abandoned.
+    strafe: Option<([f32; 3], u32)>,
+    strafe_side: f32,
     decision: Decision,
-    prev_seen: Vec<ClientId>,
     was_touching: bool,
     last_cmd: UserCmd,
     life_sequence: Option<sim::LifeSequence>,
@@ -71,15 +117,24 @@ pub struct HostController {
 
 impl HostController {
     pub fn new(seed: u64) -> Self {
+        Self::with_skill(seed, SkillLevel::default())
+    }
+
+    pub fn with_skill(seed: u64, level: SkillLevel) -> Self {
         let aggression = ((seed & 0xff) as f32) / 255.0;
         let self_preserve = (((seed >> 8) & 0xff) as f32) / 255.0;
+        let skill = BotSkill::for_level(level, seed);
         Self {
+            seed,
+            // xorshift has no zero state.
+            rng: seed.rotate_left(29) | 1,
+            skill,
             aggression,
             self_preserve,
             memory: Memory::default(),
             task: Task::default(),
             intent: BotIntent::default(),
-            motor: Motor::new(seed),
+            motor: Motor::with_skill(seed, skill),
             last_think_tick: None,
             reaction_until: 0,
             last_target: None,
@@ -92,8 +147,17 @@ impl HostController {
             nav_key: None,
             roam: None,
             roam_gen: 0,
+            roam_tick: None,
+            roam_hot: false,
+            hotspot: None,
+            hotspot_of: None,
+            investigate: None,
+            investigate_block: None,
+            alert: None,
+            damage_event: None,
+            strafe: None,
+            strafe_side: if seed & 0x1_0000 == 0 { 1.0 } else { -1.0 },
             decision: Decision::default(),
-            prev_seen: Vec::new(),
             was_touching: false,
             last_cmd: UserCmd::default(),
             life_sequence: None,
@@ -104,11 +168,36 @@ impl HostController {
         }
     }
 
+    pub fn skill(&self) -> &BotSkill {
+        &self.skill
+    }
+
+    /// Moves the bot to another difficulty, keeping its own variation of it.
+    pub fn set_skill_level(&mut self, level: SkillLevel) {
+        if self.skill.level != level {
+            self.skill = BotSkill::for_level(level, self.seed);
+            self.motor.set_skill(self.skill);
+        }
+    }
+
+    /// The buttons to let go on a tick the bot does not think on, when its
+    /// last command is sent again. They only act on a fresh press: a
+    /// semi-automatic weapon fires once per pull, so a trigger held through
+    /// the gap would fire one shot per engagement.
+    pub fn released_between_thinks(&self) -> u32 {
+        let mut released = buttons::JUMP | buttons::MELEE_CHARGE;
+        if self.intent.tap_fire {
+            released |= buttons::ATTACK;
+        }
+        released
+    }
+
     pub(crate) fn cancel_navigation(&mut self) {
         self.route_work.cancel();
         self.fight_scan = None;
         self.committed.clear();
         self.route_goal = None;
+        self.strafe = None;
     }
 
     pub fn decision(&self) -> Decision {
@@ -186,8 +275,15 @@ impl HostController {
             self.cancel_navigation();
             self.weapon.reset();
             self.roam = None;
+            self.roam_tick = None;
+            self.roam_hot = false;
+            self.hotspot = None;
+            self.hotspot_of = None;
+            self.investigate = None;
+            self.investigate_block = None;
+            self.alert = None;
+            self.damage_event = None;
             self.memory = Memory::default();
-            self.prev_seen.clear();
             self.was_touching = false;
             self.last_think_tick = None;
             self.last_target = None;
@@ -218,7 +314,10 @@ impl HostController {
             };
             return self.last_cmd;
         }
-        if self.should_think(obs.tick, obs.self_state.id.0) || self.urgent_think(obs) {
+        // The host already spaces the calls out; every bot thinks on each one.
+        // Staggering by client id on top of that left the ids of one parity
+        // with an intent that was only ever refreshed by a new sighting.
+        if self.last_think_tick != Some(obs.tick) {
             self.think(obs, world, nav, astar_budget);
             self.last_think_tick = Some(obs.tick);
         }
@@ -285,34 +384,6 @@ impl HostController {
         fire
     }
 
-    fn should_think(&self, tick: u32, id: u32) -> bool {
-        match self.last_think_tick {
-            None => true,
-            Some(last) if last == tick => false,
-            Some(_) => (tick.wrapping_add(id)).is_multiple_of(THINK_PERIOD_TICKS),
-        }
-    }
-
-    fn urgent_think(&self, obs: &BotObservation) -> bool {
-        if self.last_think_tick == Some(obs.tick) {
-            return false;
-        }
-        if self.decision.objective.is_some_and(|old| {
-            !obs.objectives.iter().chain(obs.objective.iter()).any(|o| {
-                o.id == old.id
-                    && o.round == old.round
-                    && o.action == old.action
-                    && o.use_button == old.use_button
-                    && o.touching == old.touching
-            })
-        }) {
-            return true;
-        }
-        obs.events_since(&self.prev_seen)
-            .iter()
-            .any(|event| matches!(event, BotEvent::Spotted { .. }))
-    }
-
     fn think(
         &mut self,
         obs: &BotObservation,
@@ -322,6 +393,7 @@ impl HostController {
     ) {
         let started = std::time::Instant::now();
         let events = self.memory.ingest(obs);
+        self.note_threats(obs);
         let touching_use = obs
             .objectives
             .iter()
@@ -441,12 +513,15 @@ impl HostController {
             self.task.reason = SwitchReason::ProgressLost;
         }
         self.was_touching = touching_now && self.task.kind == TaskKind::TouchObj;
+        // Hurt from somewhere it cannot see: face the bearing the damage came
+        // from and let sight do the rest. An interaction is not turned away from.
+        if let Some((point, _)) = self.alert
+            && !self.intent.use_button
+        {
+            self.intent.look_at = Some(point);
+            self.intent.sprint = false;
+        }
         self.apply_weapon_skill(obs);
-        self.prev_seen = self
-            .memory
-            .currently_seen()
-            .map(|contact| contact.id)
-            .collect();
         let weapon_act = self.weapon.act();
         if switched || previous_stage != self.decision.stage {
             let left = self
@@ -483,7 +558,10 @@ impl HostController {
     /// outcome; movement and looking stay with the task.
     fn apply_weapon_skill(&mut self, obs: &BotObservation) {
         // An interaction already under way is not displaced by an empty magazine.
-        self.weapon.update(obs, !self.intent.use_button);
+        let tactical = self.skill.tactical_reload
+            && matches!(self.task.kind, TaskKind::Hunt | TaskKind::TouchObj)
+            && self.alert.is_none();
+        self.weapon.update(obs, !self.intent.use_button, tactical);
         self.intent.weapon = self.weapon.requested_weapon();
         self.intent.reload = self.weapon.wants_reload();
         if self.intent.weapon.is_some() {
@@ -491,7 +569,158 @@ impl HostController {
         }
         if self.intent.weapon.is_some() || self.intent.reload {
             self.intent.sprint = false;
+            self.intent.ads = false;
+            self.intent.melee = false;
         }
+    }
+
+    /// Folds this observation into what the bot knows without seeing: the last
+    /// place an enemy was placed, and the direction it was last hurt from.
+    fn note_threats(&mut self, obs: &BotObservation) {
+        // Nobody walks to where an enemy they watched die used to stand.
+        if self.hotspot_of.is_some_and(|id| obs.gone.contains(&id)) {
+            self.hotspot = None;
+            self.hotspot_of = None;
+        }
+        let newest = self
+            .memory
+            .currently_seen()
+            .chain(self.memory.last_seen())
+            .max_by_key(|contact| contact.seen_tick)
+            .copied();
+        if let Some(contact) = newest
+            && self
+                .hotspot
+                .is_none_or(|(_, tick)| contact.seen_tick >= tick)
+        {
+            self.hotspot = Some((contact.origin, contact.seen_tick));
+            self.hotspot_of = Some(contact.id);
+        }
+        if self
+            .hotspot
+            .is_some_and(|(_, tick)| obs.tick.saturating_sub(tick) > HOTSPOT_TTL_TICKS)
+        {
+            self.hotspot = None;
+            self.hotspot_of = None;
+        }
+        let in_sight = self.memory.currently_seen().next().is_some();
+        let event = obs.self_state.damage_event;
+        if self.damage_event.is_some_and(|old| old != event)
+            && !in_sight
+            && let Some(yaw) = obs.self_state.attacker_yaw
+        {
+            let (sin, cos) = yaw.to_radians().sin_cos();
+            let eye = obs.eye();
+            let point = [
+                eye[0] + cos * ALERT_LOOK_IN,
+                eye[1] + sin * ALERT_LOOK_IN,
+                eye[2],
+            ];
+            self.alert = Some((point, obs.tick.saturating_add(ALERT_TICKS)));
+            if self.hotspot.is_none() {
+                let feet = obs.self_state.origin;
+                self.hotspot = Some(([point[0], point[1], feet[2]], obs.tick));
+                self.hotspot_of = None;
+            }
+        }
+        self.damage_event = Some(event);
+        if in_sight || self.alert.is_some_and(|(_, until)| obs.tick >= until) {
+            self.alert = None;
+        }
+    }
+
+    /// The remembered contact most worth walking to, with its utility. One
+    /// that was seen and lost keeps the old flat value; one that was only
+    /// heard is worth less the further off it is, so a bot on an objective is
+    /// not pulled across the map by every shot.
+    fn pick_investigation(&self, obs: &BotObservation) -> Option<(Contact, f32)> {
+        let here = obs.self_state.origin;
+        self.memory
+            .last_seen()
+            .filter(|c| obs.tick.saturating_sub(c.seen_tick) <= LAST_SEEN_FRESH_TICKS)
+            .filter(|c| {
+                self.investigate_block
+                    .is_none_or(|(id, until)| id != c.id || obs.tick >= until)
+            })
+            .map(|c| {
+                let score = if c.confidence >= 1.0 {
+                    55.0
+                } else {
+                    (58.0 - dist2(here, c.origin).sqrt() / 90.0).clamp(22.0, 55.0)
+                };
+                (*c, score)
+            })
+            .max_by(|a, b| a.1.total_cmp(&b.1))
+    }
+
+    fn next_unit(&mut self) -> f32 {
+        self.rng ^= self.rng << 13;
+        self.rng ^= self.rng >> 7;
+        self.rng ^= self.rng << 17;
+        (self.rng >> 40) as f32 / (1u64 << 24) as f32
+    }
+
+    /// The route point a few steps on, at eye height. `None` when the route is
+    /// too short for that to differ from the goal itself.
+    fn look_ahead(&self, obs: &BotObservation) -> Option<[f32; 3]> {
+        let last = self.committed.len().checked_sub(1)?;
+        let step = self.committed[LOOK_AHEAD_STEPS.min(last)].position;
+        let here = obs.self_state.origin;
+        (dist_xy(here, step) > 48.0).then(|| [step[0], step[1], step[2] + (obs.eye()[2] - here[2])])
+    }
+
+    /// The end of the current strafe leg, starting a new one to the other side
+    /// when the last is finished. A leg is only started onto ground the hull
+    /// can reach and stand on; `None` leaves the bot where it is.
+    fn strafe_goal(
+        &mut self,
+        obs: &BotObservation,
+        world: &mut impl WorldQuery,
+        threat: [f32; 3],
+    ) -> Option<[f32; 3]> {
+        let here = obs.self_state.origin;
+        if let Some((goal, until)) = self.strafe
+            && obs.tick < until
+            && dist_xy(here, goal) > 12.0
+        {
+            return Some(goal);
+        }
+        self.strafe = None;
+        let to = [threat[0] - here[0], threat[1] - here[1]];
+        let len = (to[0] * to[0] + to[1] * to[1]).sqrt();
+        if len < 1.0 {
+            return None;
+        }
+        // Mostly alternate, sometimes double back: a strict left-right rhythm
+        // is as easy to hit as standing still.
+        if self.next_unit() > 0.25 {
+            self.strafe_side = -self.strafe_side;
+        }
+        world.enter(QuerySubsystem::Tactical);
+        for side in [self.strafe_side, -self.strafe_side] {
+            let goal = [
+                here[0] - to[1] / len * side * STRAFE_STEP_IN,
+                here[1] + to[0] / len * side * STRAFE_STEP_IN,
+                here[2],
+            ];
+            if world.walk_hull(here, goal) != Ok(WalkSample::Clear) {
+                continue;
+            }
+            let Ok(floor) = world.hull_trace(
+                [goal[0], goal[1], goal[2] + 2.0],
+                [goal[0], goal[1], goal[2] - nav::STEP_Z_IN],
+            ) else {
+                return None;
+            };
+            if floor.startsolid || floor.fraction >= 1.0 {
+                continue;
+            }
+            self.strafe_side = side;
+            let legs = STRAFE_LEG_TICKS + (self.next_unit() * 8.0) as u32;
+            self.strafe = Some((floor.endpos, obs.tick.saturating_add(legs)));
+            return Some(floor.endpos);
+        }
+        None
     }
 
     fn unstick(&mut self, obs: &BotObservation, world: &mut impl WorldQuery) -> Option<BotIntent> {
@@ -558,6 +787,9 @@ impl HostController {
                 move_goal: Some(floor.endpos),
                 move_mode: MoveMode::Walk,
                 path: PathOutcome::Clear,
+                // One hop as the escape starts: what held the bot is as often
+                // a kerb or a sill as another player.
+                jump: true,
                 ..BotIntent::default()
             });
         }
@@ -566,13 +798,11 @@ impl HostController {
 
     fn pick_task(&mut self, obs: &BotObservation, objective: Option<ModeObjective>) -> Task {
         let seen = self.memory.currently_seen().next().is_some();
-        let fresh = self
-            .memory
-            .last_seen()
-            .any(|c| obs.tick.saturating_sub(c.seen_tick) <= LAST_SEEN_FRESH_TICKS);
+        let investigation = self.pick_investigation(obs);
+        self.investigate = investigation.map(|(contact, _)| contact);
         let mut scores = [
             10.0,
-            if fresh { 55.0 } else { -1.0 },
+            investigation.map_or(-1.0, |(_, score)| score),
             if seen {
                 80.0 + self.aggression * 10.0
             } else {
@@ -688,11 +918,21 @@ impl HostController {
             path,
             PathOutcome::Blocked | PathOutcome::Unreachable | PathOutcome::IncompleteGraph
         ) {
+            // A hotspot with no route to it is not tried again on the next
+            // sound from the same place: dating the roam goal ahead keeps
+            // fresher word from redirecting the bot until the backoff is over.
+            if self.roam_hot {
+                self.roam_hot = false;
+                self.roam_tick = Some(obs.tick.saturating_add(NO_ROUTE_BACKOFF_TICKS));
+            }
             self.roam = None;
             self.committed.clear();
         }
         BotIntent {
-            look_at: Some([goal[0], goal[1], obs.eye()[2]]),
+            look_at: Some(
+                self.look_ahead(obs)
+                    .unwrap_or([goal[0], goal[1], obs.eye()[2]]),
+            ),
             move_goal,
             desired_range: None,
             move_mode,
@@ -702,6 +942,22 @@ impl HostController {
     }
 
     fn ensure_roam(&mut self, obs: &BotObservation, nav: Option<&NavGraph>) -> Option<[f32; 3]> {
+        // Word of an enemy outranks wandering: go to where one was last placed,
+        // unless the bot is already heading for news about as fresh.
+        if let Some((spot, tick)) = self.hotspot
+            && self
+                .roam_tick
+                .is_none_or(|known| tick > known.saturating_add(HOTSPOT_REDIRECT_TICKS))
+            && dist2(obs.self_state.origin, spot) > 96.0 * 96.0
+        {
+            self.hotspot = None;
+            self.hotspot_of = None;
+            self.roam_tick = Some(tick);
+            self.roam_hot = true;
+            self.roam = Some(spot);
+            self.committed.clear();
+            return Some(spot);
+        }
         if let Some(goal) = self.roam
             && dist2(obs.self_state.origin, goal) > 64.0 * 64.0
         {
@@ -710,6 +966,7 @@ impl HostController {
         if self.roam.is_some() {
             self.committed.clear();
         }
+        self.roam_hot = false;
         self.roam_gen = self.roam_gen.saturating_add(1);
         let salt = obs.self_state.id.0 ^ self.roam_gen;
         let next = if let Some(graph) = nav.filter(|graph| !graph.is_empty()) {
@@ -738,10 +995,14 @@ impl HostController {
         };
         if self.last_target != Some(target.id) {
             self.last_target = Some(target.id);
-            let reaction = (6.0 - self.aggression * 4.0).max(2.0) as u32;
+            // The level sets the delay; a bold bot shaves it, a careful one
+            // takes longer to commit.
+            let reaction = (self.skill.reaction_ticks as f32 * (1.25 - 0.5 * self.aggression))
+                .round()
+                .max(2.0) as u32;
             self.reaction_until = obs.tick.saturating_add(reaction);
         }
-        let aim_at = [target.origin[0], target.origin[1], target.origin[2] + 48.0];
+        let aim_at = target.aim_point();
         if self.wounded(obs) {
             return self.fight_break(obs, world, nav, astar_budget, target);
         }
@@ -766,7 +1027,12 @@ impl HostController {
             };
         }
         if definitely_obstructed(shot, target.id) {
-            for height in [64.0, 8.0] {
+            let head = if target.height > 1.0 {
+                target.height + 4.0
+            } else {
+                64.0
+            };
+            for height in [head, 8.0] {
                 let candidate = [
                     target.origin[0],
                     target.origin[1],
@@ -782,25 +1048,28 @@ impl HostController {
                 }
             }
         }
+        let clear = shot_allowed(shot, target.id);
+        let range = dist2(obs.self_state.origin, target.origin).sqrt();
+        let plan = ShotPlan::new(obs, target, range, clear);
         let fire = self.authorize_fire(
             obs.tick >= self.reaction_until
                 && obs.self_state.ammo_clip != 0
                 && fresh_contact(obs, target)
-                && shot_allowed(shot, target.id),
+                && clear
+                && plan.in_reach
+                && !plan.melee,
             target,
         );
-        let range = dist2(obs.self_state.origin, target.origin).sqrt();
         let hold = self.hold_range(obs);
-        let (move_mode, path, move_goal) = self.fight_position(
-            obs,
-            world,
-            nav,
-            astar_budget,
-            aim_at,
-            target,
-            shot,
-            range <= hold,
-        );
+        // Inside the weapon's own range the fight is here. Further out, a clear
+        // shot is still worth standing for unless the weapon is outranged or
+        // the bot is the kind that pushes.
+        let stand = range <= hold
+            || (clear
+                && range <= obs.self_state.weapon_class.engage_max()
+                && self.aggression <= 0.6);
+        let (mut move_mode, path, mut move_goal) =
+            self.fight_position(obs, world, nav, astar_budget, aim_at, target, shot, stand);
         if matches!(
             path,
             PathOutcome::Unreachable | PathOutcome::Blocked | PathOutcome::IncompleteGraph
@@ -834,7 +1103,24 @@ impl HostController {
             };
             return self.hunt(obs, world, nav, astar_budget);
         }
-        BotIntent {
+        // Trading shots from one spot is how the first exchange is lost; keep
+        // moving across the line of fire while the shot stays open. A scope is
+        // the exception: it is only steady standing still.
+        if move_mode == MoveMode::Hold
+            && path == PathOutcome::Clear
+            && clear
+            && self.skill.strafes
+            && !plan.melee
+            && !plan.ads_required
+        {
+            if let Some(goal) = self.strafe_goal(obs, world, target.origin) {
+                move_mode = MoveMode::Walk;
+                move_goal = Some(goal);
+            }
+        } else {
+            self.strafe = None;
+        }
+        plan.apply(BotIntent {
             look_at: Some(aim_at),
             move_goal,
             desired_range: Some(hold),
@@ -842,7 +1128,7 @@ impl HostController {
             fire,
             path,
             ..BotIntent::default()
-        }
+        })
     }
 
     fn pick_fight_target(&self, obs: &BotObservation) -> Option<Contact> {
@@ -866,7 +1152,7 @@ impl HostController {
     }
 
     fn hold_range(&self, obs: &BotObservation) -> f32 {
-        (obs.self_state.weapon_class.fight_hold() - 40.0 * self.aggression).max(48.0)
+        (obs.self_state.weapon_class.fight_hold() * (1.0 - 0.3 * self.aggression)).max(48.0)
     }
 
     fn fight_break(
@@ -877,23 +1163,34 @@ impl HostController {
         astar_budget: &mut u32,
         target: Contact,
     ) -> BotIntent {
-        let aim_at = [target.origin[0], target.origin[1], target.origin[2] + 48.0];
+        let aim_at = target.aim_point();
         let away = away_from(obs.self_state.origin, target.origin, 192.0);
         world.enter(QuerySubsystem::Tactical);
+        let clear = shot_allowed(
+            world.shot_ray(obs.eye(), aim_at, obs.self_state.id),
+            target.id,
+        );
+        let range = dist2(obs.self_state.origin, target.origin).sqrt();
+        // Backing off, the gun stays at the hip: raising the sights would slow
+        // the retreat it is covering.
+        let plan = ShotPlan {
+            ads: false,
+            ads_required: false,
+            ..ShotPlan::new(obs, target, range, clear)
+        };
         let fire = self.authorize_fire(
             self.aggression > self.self_preserve
                 && obs.tick >= self.reaction_until
                 && obs.self_state.ammo_clip != 0
                 && fresh_contact(obs, target)
-                && shot_allowed(
-                    world.shot_ray(obs.eye(), aim_at, obs.self_state.id),
-                    target.id,
-                ),
+                && clear
+                && plan.in_reach
+                && !plan.melee,
             target,
         );
         let (move_mode, path, move_goal) =
             self.route(obs.self_state.origin, away, world, nav, astar_budget);
-        BotIntent {
+        plan.apply(BotIntent {
             look_at: Some(aim_at),
             move_goal,
             desired_range: None,
@@ -901,7 +1198,7 @@ impl HostController {
             fire,
             path,
             ..BotIntent::default()
-        }
+        })
     }
 
     /// Where to stand for this engagement. Both the reposition inside weapon
@@ -1084,10 +1381,13 @@ impl HostController {
     ) -> BotIntent {
         let (goal, use_button, look) = match kind {
             SeekKind::LastSeen => {
-                let Some(last) = self.memory.last_seen().next().copied() else {
+                let Some(last) = self
+                    .investigate
+                    .or_else(|| self.memory.last_seen().next().copied())
+                else {
                     return BotIntent::default();
                 };
-                (last.origin, false, last.origin)
+                (last.origin, false, last.aim_point())
             }
             SeekKind::Objective(obj) => {
                 let Some(obj) = obj else {
@@ -1150,6 +1450,16 @@ impl HostController {
         };
         let (move_mode, path, move_goal) =
             self.route(obs.self_state.origin, goal, world, nav, astar_budget);
+        if kind == SeekKind::LastSeen
+            && matches!(
+                path,
+                PathOutcome::Unreachable | PathOutcome::IncompleteGraph
+            )
+            && let Some(contact) = self.investigate
+        {
+            self.investigate_block =
+                Some((contact.id, obs.tick.saturating_add(NO_ROUTE_BACKOFF_TICKS)));
+        }
         BotIntent {
             look_at: Some(look),
             move_goal,
@@ -1283,6 +1593,67 @@ impl HostController {
 /// position does not, and neither does a small move by the threat — that is the
 /// `anchor` distance below, not a grid cell, so no boundary makes one step
 /// count as a new engagement.
+/// How the weapon in hand is worked against one target at one range: sights,
+/// trigger discipline and how tight the aim has to be before a shot goes.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct ShotPlan {
+    ads: bool,
+    ads_required: bool,
+    melee: bool,
+    tap_fire: bool,
+    burst: bool,
+    fire_cone_deg: f32,
+    /// The target is close enough for this weapon to be worth firing at all.
+    /// A shotgun emptied at a rifle's range is ammunition thrown away.
+    in_reach: bool,
+}
+
+impl ShotPlan {
+    fn new(obs: &BotObservation, target: Contact, range: f32, clear: bool) -> Self {
+        let class = obs.self_state.weapon_class;
+        let facts = obs.held().map(|slot| slot.facts);
+        let tap_fire = facts.is_some_and(|facts| facts.fire_single);
+        let melee = clear && range <= MELEE_RANGE_IN;
+        // A weapon the content has no row for is assumed to have sights. They
+        // only come up for a shot that is open: walking to a firing position
+        // with them raised is walking there at half speed.
+        let ads = facts.is_none_or(|facts| facts.can_ads)
+            && clear
+            && range >= class.ads_min()
+            && fresh_contact(obs, target)
+            && !melee;
+        Self {
+            ads,
+            ads_required: ads && class == crate::observation::WeaponClass::Sniper,
+            melee,
+            tap_fire,
+            burst: !tap_fire && range > BURST_RANGE_IN,
+            fire_cone_deg: fire_cone(range),
+            in_reach: range <= class.engage_max() * 1.25,
+        }
+    }
+
+    fn apply(self, intent: BotIntent) -> BotIntent {
+        BotIntent {
+            ads: self.ads,
+            ads_required: self.ads_required,
+            melee: self.melee,
+            tap_fire: self.tap_fire,
+            burst: self.burst,
+            fire_cone_deg: self.fire_cone_deg,
+            ..intent
+        }
+    }
+}
+
+/// Half-angle the view must be inside before a shot. About one and a half
+/// body-widths at the target's range, plus a degree: wide enough up close that
+/// turning never holds fire, narrow enough at range that rounds are not thrown
+/// past a target the view has not reached yet.
+fn fire_cone(range: f32) -> f32 {
+    ((20.0 / range.max(1.0)).atan().to_degrees() * 1.5 + 1.0).clamp(1.5, DEFAULT_FIRE_CONE_DEG)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct FightScanKey {
     target: ClientId,

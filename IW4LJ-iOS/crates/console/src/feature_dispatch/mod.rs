@@ -1,7 +1,7 @@
 use bevy::prelude::*;
 use bots::{
-    BotAddQueue, BotFireQueue, BotHold, BotRoster, BotTpQueue, BotTpRequest, BotTpTarget,
-    BotTpWhere,
+    BotAddQueue, BotDifficulty, BotFireQueue, BotHold, BotRoster, BotTpQueue, BotTpRequest,
+    BotTpTarget, BotTpWhere, SkillLevel,
 };
 use hud::PendingSplash;
 use net::ClientActionInbox;
@@ -36,10 +36,11 @@ pub(crate) fn route_debug_feature_commands(
         ResMut<ConsoleLine>,
     ),
     mut bot_add: ResMut<BotAddQueue>,
-    (mut bot_hold, mut bot_tp, mut bot_fire): (
+    (mut bot_hold, mut bot_tp, mut bot_fire, mut bot_skill): (
         ResMut<BotHold>,
         ResMut<BotTpQueue>,
         ResMut<BotFireQueue>,
+        ResMut<BotDifficulty>,
     ),
     (weapons, mut inbox, mut give_seq, roster): (
         Option<Res<assets::PreparedWeapons>>,
@@ -77,6 +78,17 @@ pub(crate) fn route_debug_feature_commands(
                 Ok(BotVerb::Dummy(n)) => {
                     bot_add.push_dummy(n);
                     echo(format!("bot: queued dummy {n}"), console, line);
+                }
+                Ok(BotVerb::Skill(None)) => {
+                    echo(
+                        format!("bot: skill is {}", bot_skill.0.label()),
+                        console,
+                        line,
+                    );
+                }
+                Ok(BotVerb::Skill(Some(level))) => {
+                    bot_skill.set(level);
+                    echo(format!("bot: skill {}", level.label()), console, line);
                 }
                 Ok(BotVerb::Hold(on)) => {
                     bot_hold.0 = on;
@@ -294,7 +306,7 @@ pub fn register_feature_commands(registry: &mut crate::ConsoleRegistry, maps: &[
         ),
         (
             "bot",
-            "bot add [N] | dummy [N] | hold [on|off] | give <id> <weapon> [att...] [camo=<name>] | fire [all|<id>] | tp all|<id> above <h> | tp all|<id> <x> <y> <z>",
+            "bot add [N] | dummy [N] | skill [recruit|regular|hardened|veteran] | hold [on|off] | give <id> <weapon> [att...] [camo=<name>] | fire [all|<id>] | tp all|<id> above <h> | tp all|<id> <x> <y> <z>",
         ),
         (
             "menu",
@@ -316,12 +328,14 @@ pub fn register_feature_commands(registry: &mut crate::ConsoleRegistry, maps: &[
     }
 }
 
-pub(crate) const BOT_USAGE: &str = "usage: bot add [N] | dummy [N] | hold [on|off] | give <id> <weapon> [att...] [camo=<name>] | fire [all|<id>] | tp all|<id> above <h> | tp all|<id> <x> <y> <z> [yaw] [pitch]";
+pub(crate) const BOT_USAGE: &str = "usage: bot add [N] | dummy [N] | skill [recruit|regular|hardened|veteran] | hold [on|off] | give <id> <weapon> [att...] [camo=<name>] | fire [all|<id>] | tp all|<id> above <h> | tp all|<id> <x> <y> <z> [yaw] [pitch]";
 
 #[derive(Debug, PartialEq)]
 pub(crate) enum BotVerb {
     Add(u32),
     Dummy(u32),
+    /// `None` asks what the difficulty is; a level sets it for every bot.
+    Skill(Option<SkillLevel>),
     Hold(bool),
     Give {
         id: ClientId,
@@ -358,6 +372,14 @@ pub(crate) fn parse_bot_args(args: &[String]) -> Result<BotVerb, String> {
             }
             Ok(BotVerb::Dummy(n))
         }
+        "skill" => match args.get(1) {
+            None => Ok(BotVerb::Skill(None)),
+            Some(token) => SkillLevel::from_token(token)
+                .map(|level| BotVerb::Skill(Some(level)))
+                .ok_or_else(|| {
+                    format!("usage: bot skill [recruit|regular|hardened|veteran] (got `{token}`)")
+                }),
+        },
         "hold" => match args.get(1).map(String::as_str) {
             None | Some("on") | Some("1") => Ok(BotVerb::Hold(true)),
             Some("off") | Some("0") => Ok(BotVerb::Hold(false)),

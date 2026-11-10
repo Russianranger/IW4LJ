@@ -2,47 +2,63 @@ use math_iw4::{angle_normalize_360, angle_subtract, yaw_vectors_2d};
 use movement_iw4::ANGLE2SHORT;
 use playerstate_iw4::{UserCmd, buttons};
 
-use crate::intent::{BotIntent, MotorReport, MoveMode, PathOutcome};
+use crate::intent::{BotIntent, DEFAULT_FIRE_CONE_DEG, MotorReport, MoveMode, PathOutcome};
 use crate::observation::BotObservation;
+use crate::skill::BotSkill;
 
 const MAX_YAW_DEG_PER_MS: f32 = 0.36;
 const MAX_PITCH_DEG_PER_MS: f32 = 0.24;
-const MAX_YAW_ACCEL_DEG_PER_MS2: f32 = 0.015;
-const MAX_PITCH_ACCEL_DEG_PER_MS2: f32 = 0.01;
-const FIRE_CONE_DEG: f32 = 8.0;
 const ARRIVE_IN: f32 = 24.0;
 const PITCH_LIMIT: f32 = 70.0;
+/// A look target that jumps further than this in one step is a new target, and
+/// the aim has to settle on it again.
+const REACQUIRE_IN: f32 = 96.0;
+/// How often the settled aim picks a new point to drift toward.
+const WANDER_PERIOD_MS: f32 = 240.0;
+/// Automatic fire at range: this many driven steps on, then this many off.
+const BURST_ON: u32 = 3;
+const BURST_OFF: u32 = 2;
+/// How far the sights must be up before a weapon that needs them may fire.
+const ADS_READY: f32 = 0.85;
 
 #[derive(Clone, Debug)]
 pub struct Motor {
     yaw: f32,
     pitch: f32,
-    yaw_vel: f32,
-    pitch_vel: f32,
-    err_yaw: f32,
-    err_pitch: f32,
-    acquire_yaw: f32,
+    skill: BotSkill,
+    rng: u64,
+    /// The aim's current offset from the true line, in units of the error
+    /// amplitude, and the point it is drifting toward.
+    wander: [f32; 2],
+    wander_goal: [f32; 2],
+    wander_ms: f32,
+    /// Milliseconds spent on the current look target.
+    settle_ms: f32,
+    burst_step: u32,
     last_look: Option<[f32; 3]>,
     armed: Option<sim::LifeSequence>,
 }
 
 impl Motor {
-    pub fn new(seed: u64) -> Self {
-        let self_preserve = (((seed >> 8) & 0xff) as f32) / 255.0;
-        let spread = 0.75 + 0.75 * self_preserve;
-        let err_yaw = (((seed >> 3) & 0xffff) as f32 / 65535.0 - 0.5) * 4.0 * spread;
-        let err_pitch = (((seed >> 11) & 0xffff) as f32 / 65535.0 - 0.5) * 2.0 * spread;
+    pub fn with_skill(seed: u64, skill: BotSkill) -> Self {
         Self {
             yaw: 0.0,
             pitch: 0.0,
-            yaw_vel: 0.0,
-            pitch_vel: 0.0,
-            err_yaw,
-            err_pitch,
-            acquire_yaw: 0.0,
+            skill,
+            // xorshift has no zero state.
+            rng: seed | 1,
+            wander: [0.0; 2],
+            wander_goal: [0.0; 2],
+            wander_ms: WANDER_PERIOD_MS,
+            settle_ms: 0.0,
+            burst_step: 0,
             last_look: None,
             armed: None,
         }
+    }
+
+    pub fn set_skill(&mut self, skill: BotSkill) {
+        self.skill = skill;
     }
 
     pub fn report(&self, obs: &BotObservation, intent: &BotIntent, cmd: &UserCmd) -> MotorReport {
@@ -78,38 +94,59 @@ impl Motor {
         MotorReport::Executing
     }
 
+    /// `dt_ms` is the time since the previous call, which is the think
+    /// interval and not necessarily one authority tick.
     pub fn drive(&mut self, obs: &BotObservation, intent: &BotIntent, dt_ms: i32) -> UserCmd {
         if self.armed != Some(obs.self_state.life_sequence) {
             self.yaw = obs.self_state.viewangles[1];
             self.pitch = angle_subtract(obs.self_state.viewangles[0], 0.0);
             self.armed = Some(obs.self_state.life_sequence);
+            self.last_look = None;
+            self.burst_step = 0;
         }
         let dt = dt_ms.max(1) as f32;
+        let mut error_deg = self.skill.aim_error_deg;
         if let Some(at) = intent.look_at {
             if self
                 .last_look
-                .is_none_or(|old| dist2(old, at) > 48.0 * 48.0)
+                .is_none_or(|old| dist2(old, at) > REACQUIRE_IN * REACQUIRE_IN)
             {
-                self.acquire_yaw = 6.0;
+                self.settle_ms = 0.0;
+            } else {
+                self.settle_ms += dt;
             }
             self.last_look = Some(at);
-            self.acquire_yaw *= 0.85_f32.powf(dt / 16.0);
+            self.drift(dt);
+            error_deg += self.skill.acquire_error_deg
+                * (-self.settle_ms / self.skill.settle_ms.max(1.0)).exp();
             let desire = look_angles(obs.eye(), at);
-            let (yaw, yaw_vel) = slew_yaw(
-                self.yaw,
-                desire[1] + self.err_yaw + self.acquire_yaw,
-                self.yaw_vel,
-                dt,
+            // The fraction of the remaining error closed per 100 ms. Scaling it
+            // by the step keeps the feel the same at any think rate.
+            let gain = (0.45 + 0.2 * self.skill.turn_scale).min(0.9);
+            let gain = 1.0 - (1.0 - gain).powf(dt / 100.0);
+            let yaw_err = angle_subtract(desire[1] + self.wander[0] * error_deg, self.yaw);
+            self.yaw = angle_normalize_360(
+                self.yaw
+                    + slew(
+                        yaw_err,
+                        MAX_YAW_DEG_PER_MS * self.skill.turn_scale,
+                        gain,
+                        dt,
+                    ),
             );
-            self.yaw = yaw;
-            self.yaw_vel = yaw_vel;
-            let (pitch, pitch_vel) =
-                slew_pitch(self.pitch, desire[0] + self.err_pitch, self.pitch_vel, dt);
-            self.pitch = pitch;
-            self.pitch_vel = pitch_vel;
+            // A standing target is taller than it is wide, so the vertical
+            // error is held to half the horizontal one.
+            let pitch_goal =
+                (desire[0] + self.wander[1] * error_deg * 0.5).clamp(-PITCH_LIMIT, PITCH_LIMIT);
+            self.pitch = (self.pitch
+                + slew(
+                    pitch_goal - self.pitch,
+                    MAX_PITCH_DEG_PER_MS * self.skill.turn_scale,
+                    gain,
+                    dt,
+                ))
+            .clamp(-PITCH_LIMIT, PITCH_LIMIT);
         } else {
-            self.yaw_vel = 0.0;
-            self.pitch_vel = 0.0;
             self.last_look = None;
         }
         let unsupported = matches!(intent.move_mode, MoveMode::Mantle | MoveMode::Ladder);
@@ -144,8 +181,14 @@ impl Motor {
             weapon_mapped: weapon,
             ..UserCmd::default()
         };
-        if intent.fire && self.weapon_on_target(obs, intent) {
+        if self.pull_trigger(obs, intent) {
             cmd.buttons |= buttons::ATTACK;
+        }
+        if intent.melee && self.on_target(obs, intent, DEFAULT_FIRE_CONE_DEG) {
+            cmd.buttons |= buttons::MELEE_CHARGE;
+        }
+        if intent.ads {
+            cmd.buttons |= buttons::ADS;
         }
         if intent.use_button {
             cmd.buttons |= buttons::USE;
@@ -153,12 +196,16 @@ impl Motor {
         if intent.reload {
             cmd.buttons |= buttons::RELOAD;
         }
+        if intent.jump {
+            cmd.buttons |= buttons::JUMP;
+        }
         if intent.sprint
             && walking
             && intent.move_mode == MoveMode::Walk
             && forwardmove > 110
             && rightmove.abs() < 45
             && !intent.fire
+            && !intent.ads
             && !intent.use_button
             && !intent.reload
             && !intent.crouch
@@ -171,13 +218,62 @@ impl Motor {
         cmd
     }
 
-    fn weapon_on_target(&self, obs: &BotObservation, intent: &BotIntent) -> bool {
+    /// Whether this step presses the trigger. Being allowed to fire is the
+    /// controller's decision; whether the gun is pointing well enough, the
+    /// sights are up and the burst is in its firing half is decided here.
+    fn pull_trigger(&mut self, obs: &BotObservation, intent: &BotIntent) -> bool {
+        if !intent.fire {
+            self.burst_step = 0;
+            return false;
+        }
+        // The cone never closes tighter than the bot can hold the gun.
+        let cone = intent
+            .fire_cone_deg
+            .max(self.skill.aim_error_deg * 1.25 + 0.5);
+        if !self.on_target(obs, intent, cone) {
+            return false;
+        }
+        if intent.ads_required && obs.self_state.ads < ADS_READY {
+            return false;
+        }
+        if intent.burst && !intent.tap_fire {
+            let firing = self.burst_step < BURST_ON;
+            self.burst_step = (self.burst_step + 1) % (BURST_ON + BURST_OFF);
+            return firing;
+        }
+        true
+    }
+
+    fn on_target(&self, obs: &BotObservation, intent: &BotIntent, cone_deg: f32) -> bool {
         let Some(at) = intent.look_at else {
             return false;
         };
         let desire = look_angles(obs.eye(), at);
-        angle_subtract(desire[1], self.yaw).abs() <= FIRE_CONE_DEG
-            && (desire[0] - self.pitch).abs() <= FIRE_CONE_DEG
+        angle_subtract(desire[1], self.yaw).abs() <= cone_deg
+            && (desire[0] - self.pitch).abs() <= cone_deg
+    }
+
+    /// Moves the aim offset toward its current drift point and picks a new
+    /// point every period, so shots scatter around a target instead of sitting
+    /// at one fixed offset from it.
+    fn drift(&mut self, dt: f32) {
+        self.wander_ms += dt;
+        if self.wander_ms >= WANDER_PERIOD_MS {
+            self.wander_ms = 0.0;
+            self.wander_goal = [self.next_signed(), self.next_signed()];
+        }
+        let step = (dt / WANDER_PERIOD_MS).min(1.0);
+        for axis in 0..2 {
+            self.wander[axis] += (self.wander_goal[axis] - self.wander[axis]) * step;
+        }
+    }
+
+    /// Uniform in [-1, 1).
+    fn next_signed(&mut self) -> f32 {
+        self.rng ^= self.rng << 13;
+        self.rng ^= self.rng >> 7;
+        self.rng ^= self.rng << 17;
+        ((self.rng >> 40) as f32 / (1u64 << 24) as f32) * 2.0 - 1.0
     }
 }
 
@@ -189,30 +285,11 @@ fn look_angles(from: [f32; 3], to: [f32; 3]) -> [f32; 3] {
     angles
 }
 
-fn slew_yaw(current: f32, desire: f32, vel: f32, dt: f32) -> (f32, f32) {
-    let err = angle_subtract(desire, current);
-    let (delta, vel) = slew_vel(err, vel, MAX_YAW_DEG_PER_MS, MAX_YAW_ACCEL_DEG_PER_MS2, dt);
-    (angle_normalize_360(current + delta), vel)
-}
-
-fn slew_pitch(current: f32, desire: f32, vel: f32, dt: f32) -> (f32, f32) {
-    let desire = desire.clamp(-PITCH_LIMIT, PITCH_LIMIT);
-    let err = desire - current;
-    let (delta, vel) = slew_vel(
-        err,
-        vel,
-        MAX_PITCH_DEG_PER_MS,
-        MAX_PITCH_ACCEL_DEG_PER_MS2,
-        dt,
-    );
-    ((current + delta).clamp(-PITCH_LIMIT, PITCH_LIMIT), vel)
-}
-
-fn slew_vel(err: f32, vel: f32, max_rate: f32, max_accel: f32, dt: f32) -> (f32, f32) {
-    let want = (err / dt).clamp(-max_rate, max_rate);
-    let vel =
-        (vel + (want - vel).clamp(-max_accel * dt, max_accel * dt)).clamp(-max_rate, max_rate);
-    (vel * dt, vel)
+/// One step toward closing `err`: a fraction of what is left, capped at the
+/// turn rate. Converging by a fraction is what makes the view settle onto a
+/// target rather than snap to it.
+fn slew(err: f32, max_rate: f32, gain: f32, dt: f32) -> f32 {
+    (err * gain).clamp(-max_rate * dt, max_rate * dt)
 }
 
 fn wish_to_move(yaw_deg: f32, wish: [f32; 2]) -> (i8, i8) {
