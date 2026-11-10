@@ -11,8 +11,8 @@ use sim::{ClientAction, ClientLifecycle, SimWorld, Tick};
 use crate::nav::{self, NAV_HULL, NAV_SCHEMA, NavGraph, RouteStats};
 use crate::query::{Budgeted, QueryCounters, QuerySubsystem, TraceBudget};
 use crate::roster::{
-    BotAddQueue, BotDifficulty, BotFireQueue, BotHold, BotRoster, BotTpQueue, BotTpTarget,
-    BotTpWhere, default_class_index,
+    BotAddQueue, BotAutoFill, BotDifficulty, BotFireQueue, BotHold, BotRoster, BotTpQueue,
+    BotTpTarget, BotTpWhere, default_class_index,
 };
 use crate::sensor;
 use frame::{AuthoritySet, BotNavigationReady, ClientSet, RuntimeRole};
@@ -111,6 +111,7 @@ impl Plugin for BotsPlugin {
             .init_resource::<BotAddQueue>()
             .init_resource::<BotHold>()
             .init_resource::<BotDifficulty>()
+            .init_resource::<BotAutoFill>()
             .init_resource::<BotTpQueue>()
             .init_resource::<BotFireQueue>()
             .scoped::<crate::BotPlacements>(frame::MatchScope::Live)
@@ -156,6 +157,7 @@ fn fill_bots_from_rules(
     installed: Option<Res<State<frame::MatchScope>>>,
     rules: Option<Res<frame::HostMatchRules>>,
     world: Option<Res<AuthorityWorld>>,
+    auto_fill: Res<BotAutoFill>,
 ) {
     if roster.rules_filled
         || !installed.is_some_and(|installed| *installed.get() == frame::MatchScope::Live)
@@ -166,29 +168,34 @@ fn fill_bots_from_rules(
         return;
     };
     roster.rules_filled = true;
-    let Some(rules) = rules else {
-        return;
-    };
     let count = |dvar: &str| {
         rules
-            .0
-            .iter()
-            .find(|(name, _)| name == dvar)
+            .as_ref()
+            .and_then(|rules| rules.0.iter().find(|(name, _)| name == dvar))
             .and_then(|(_, value)| value.trim().parse::<u32>().ok())
             .unwrap_or(0)
     };
-    let enemies = count(sim::ENEMY_BOTS_DVAR);
-    let friends = if world.0.game_mode_kind() == gamemode_iw4::GameModeKind::FreeForAll {
-        0
-    } else {
+    let team_based = world.0.game_mode_kind() != gamemode_iw4::GameModeKind::FreeForAll;
+    let mut enemies = count(sim::ENEMY_BOTS_DVAR);
+    let mut friends = if team_based {
         count(sim::FRIENDLY_BOTS_DVAR)
+    } else {
+        0
     };
+    let mut source = "game rules";
+    // Counts the host chose in the lobby stand. With none, the match is
+    // filled to a lobby the map can hold, so a player on their own has one.
+    if enemies == 0 && friends == 0 {
+        let span = crate::fill::spawn_span(&world.0.authored_spawn_origins());
+        (enemies, friends) = auto_fill.0.bots(team_based, span);
+        source = "auto-fill";
+    }
     queue.push_side(enemies, crate::BotSide::Enemy);
     queue.push_side(friends, crate::BotSide::Friendly);
     if enemies > 0 || friends > 0 {
         diag::info!(
             Sim,
-            "bots: game rules add {enemies} enemy and {friends} friendly"
+            "bots: {source} add {enemies} enemy and {friends} friendly"
         );
     }
 }

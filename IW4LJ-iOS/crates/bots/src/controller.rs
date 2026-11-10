@@ -1,12 +1,14 @@
 use playerstate_iw4::{UserCmd, buttons};
 use sim::{ClientId, ClientLifecycle};
 
+use crate::grenade;
 use crate::intent::{BotIntent, DEFAULT_FIRE_CONE_DEG, MotorReport, MoveMode, PathOutcome};
 use crate::memory::Memory;
 use crate::motor::Motor;
 use crate::nav::{self, NavGraph, PathError};
 use crate::observation::{
-    BotObservation, Contact, KnowledgeSource, ModeObjective, ObjectiveAction, TeamRole,
+    BotObservation, Contact, KnowledgeSource, ModeObjective, ObjectiveAction, Offhand, StreakKind,
+    TeamRole, ThrowKind, WeaponAction,
 };
 use crate::query::{QueryResult, QuerySubsystem, SightSample, WalkSample, WorldQuery};
 use crate::skill::{BotSkill, SkillLevel};
@@ -59,6 +61,29 @@ const BURST_RANGE_IN: f32 = 900.0;
 /// One side-step of a strafe, and how long a leg lasts before the next.
 const STRAFE_STEP_IN: f32 = 72.0;
 const STRAFE_LEG_TICKS: u32 = 10;
+/// A grenade is thrown at a position this far out: nearer and the thrower is
+/// inside its own blast, further and it does not arrive.
+const GRENADE_MIN_IN: f32 = 380.0;
+const GRENADE_MAX_IN: f32 = 1150.0;
+/// How fresh word of an enemy has to be to be worth a grenade.
+const GRENADE_FRESH_TICKS: u32 = 24;
+/// The pin is held this long, and the arm is given this long to finish the
+/// throw after it is let go.
+const GRENADE_HOLD_TICKS: u32 = 6;
+const GRENADE_FOLLOW_TICKS: u32 = 14;
+/// The view gets this long to reach the throwing angle before the throw goes
+/// anyway.
+const GRENADE_AIM_TICKS: u32 = 16;
+/// The shortest gap between one bot's throws; a random stretch is added.
+const GRENADE_COOLDOWN_TICKS: u32 = 160;
+/// How long a killstreak gets to be called in before the bot stops trying and
+/// waits to try again.
+const STREAK_TICKS: u32 = 120;
+const STREAK_RETRY_TICKS: u32 = 300;
+/// Holding use on something for this long without it finishing means it is not
+/// going to; the objective is then left alone for a while.
+const USE_GIVE_UP_TICKS: u32 = 240;
+const USE_SHUN_TICKS: u32 = 900;
 
 #[derive(Clone, Debug)]
 pub struct HostController {
@@ -105,6 +130,18 @@ pub struct HostController {
     /// The live strafe leg: where it ends and the tick it is abandoned.
     strafe: Option<([f32; 3], u32)>,
     strafe_side: f32,
+    /// The throw in progress.
+    grenade: Option<GrenadeAct>,
+    grenade_ready_tick: u32,
+    /// Throws made this life, lethal then tactical.
+    thrown: [u8; 2],
+    /// The killstreak being called in, and the tick the attempt is dropped.
+    streak: Option<(u16, StreakKind, u32)>,
+    streak_ready_tick: u32,
+    /// The use objective being held, and since when.
+    using: Option<(u32, u32)>,
+    /// A use objective given up on, and the tick it may be tried again.
+    shunned: Option<(u32, u32)>,
     decision: Decision,
     was_touching: bool,
     last_cmd: UserCmd,
@@ -157,6 +194,13 @@ impl HostController {
             damage_event: None,
             strafe: None,
             strafe_side: if seed & 0x1_0000 == 0 { 1.0 } else { -1.0 },
+            grenade: None,
+            grenade_ready_tick: 0,
+            thrown: [0; 2],
+            streak: None,
+            streak_ready_tick: 0,
+            using: None,
+            shunned: None,
             decision: Decision::default(),
             was_touching: false,
             last_cmd: UserCmd::default(),
@@ -185,8 +229,8 @@ impl HostController {
     /// semi-automatic weapon fires once per pull, so a trigger held through
     /// the gap would fire one shot per engagement.
     pub fn released_between_thinks(&self) -> u32 {
-        let mut released = buttons::JUMP | buttons::MELEE_CHARGE;
-        if self.intent.tap_fire {
+        let mut released = buttons::JUMP | buttons::MELEE_CHARGE | buttons::LOCATION_SELECT;
+        if self.intent.tap_fire || self.intent.place_held {
             released |= buttons::ATTACK;
         }
         released
@@ -283,6 +327,10 @@ impl HostController {
             self.investigate_block = None;
             self.alert = None;
             self.damage_event = None;
+            self.grenade = None;
+            self.thrown = [0; 2];
+            self.streak = None;
+            self.using = None;
             self.memory = Memory::default();
             self.was_touching = false;
             self.last_think_tick = None;
@@ -392,6 +440,17 @@ impl HostController {
         astar_budget: &mut u32,
     ) {
         let started = std::time::Instant::now();
+        if self.shunned.is_some_and(|(_, until)| obs.tick >= until) {
+            self.shunned = None;
+        }
+        let pruned;
+        let obs = match self.shunned {
+            Some((id, _)) => {
+                pruned = obs.without_objective(id);
+                &pruned
+            }
+            None => obs,
+        };
         let events = self.memory.ingest(obs);
         self.note_threats(obs);
         let touching_use = obs
@@ -521,7 +580,10 @@ impl HostController {
             self.intent.look_at = Some(point);
             self.intent.sprint = false;
         }
+        self.watch_use(obs, touching_use);
         self.apply_weapon_skill(obs);
+        self.throw_grenade(obs, world);
+        self.call_streak(obs);
         let weapon_act = self.weapon.act();
         if switched || previous_stage != self.decision.stage {
             let left = self
@@ -571,6 +633,202 @@ impl HostController {
             self.intent.sprint = false;
             self.intent.ads = false;
             self.intent.melee = false;
+        }
+    }
+
+    /// Gives up on a use objective that has been held far longer than any of
+    /// them takes: a crate on a roof, a prompt the bot is not quite facing.
+    fn watch_use(&mut self, obs: &BotObservation, held: Option<ModeObjective>) {
+        let Some(objective) = held.filter(|_| self.intent.use_button) else {
+            self.using = None;
+            return;
+        };
+        match self.using {
+            Some((id, since)) if id == objective.id => {
+                if obs.tick.saturating_sub(since) > USE_GIVE_UP_TICKS {
+                    self.shunned = Some((id, obs.tick.saturating_add(USE_SHUN_TICKS)));
+                    self.using = None;
+                    self.intent.use_button = false;
+                }
+            }
+            _ => self.using = Some((objective.id, obs.tick)),
+        }
+    }
+
+    /// Where a grenade would do some good: an enemy placed a moment ago that
+    /// the bot is not, right now, shooting at.
+    fn grenade_target(&self, obs: &BotObservation) -> Option<[f32; 3]> {
+        let fresh =
+            |contact: &&Contact| obs.tick.saturating_sub(contact.seen_tick) <= GRENADE_FRESH_TICKS;
+        let behind_cover = self
+            .memory
+            .last_seen()
+            .filter(fresh)
+            .max_by_key(|contact| contact.seen_tick);
+        // In sight but with no shot for a while: dug in behind something.
+        let no_shot = self
+            .memory
+            .currently_seen()
+            .find(|_| !self.intent.fire && obs.tick > self.reaction_until.saturating_add(20));
+        behind_cover.or(no_shot).map(|contact| contact.origin)
+    }
+
+    /// Starts a throw when there is a target for one, and carries a started
+    /// throw through: turn to the angle, pull the pin, let go, follow through.
+    fn throw_grenade(&mut self, obs: &BotObservation, world: &mut impl WorldQuery) {
+        if let Some(act) = self.grenade {
+            self.continue_throw(obs, act);
+            return;
+        }
+        if self.skill.level == SkillLevel::Recruit
+            || obs.tick < self.grenade_ready_tick
+            || obs.self_state.weapon_action != WeaponAction::Ready
+            || self.intent.use_button
+            || self.intent.reload
+            || self.intent.weapon.is_some()
+            || self.streak.is_some()
+            || !matches!(self.task.kind, TaskKind::Fight | TaskKind::Investigate)
+        {
+            return;
+        }
+        let Some(target) = self.grenade_target(obs) else {
+            return;
+        };
+        let range = dist2(obs.self_state.origin, target).sqrt();
+        if !(GRENADE_MIN_IN..=GRENADE_MAX_IN).contains(&range) {
+            return;
+        }
+        // Whatever comes of it, the question is not asked again straight away.
+        self.grenade_ready_tick = obs.tick.saturating_add(40);
+        let usable = |slot: Option<Offhand>, made: u8, limit: u8| {
+            slot.filter(|offhand| made < limit && offhand.facts.kind != ThrowKind::Other)
+        };
+        let (offhand, tactical) = match (
+            usable(obs.self_state.lethal, self.thrown[0], 1),
+            usable(obs.self_state.tactical, self.thrown[1], 2),
+        ) {
+            (Some(lethal), _) => (lethal, false),
+            (None, Some(tactical)) => (tactical, true),
+            (None, None) => return,
+        };
+        // Not every chance is taken: a bot that answers every sound with a
+        // grenade has none left for the one that matters.
+        if self.next_unit() > 0.6 {
+            return;
+        }
+        let eye = obs.eye();
+        let aim = [target[0], target[1], target[2] + 8.0];
+        let Some(throw) = grenade::solve(eye, aim, &offhand.facts) else {
+            return;
+        };
+        if offhand.facts.fuse_ms > 0 && throw.flight_s * 1000.0 > offhand.facts.fuse_ms as f32 {
+            return;
+        }
+        world.enter(QuerySubsystem::Tactical);
+        if throw.arc_is_open(eye, &offhand.facts, world, obs.self_state.id) != Ok(true) {
+            return;
+        }
+        let act = GrenadeAct {
+            weapon: offhand.weapon,
+            tactical,
+            look_at: throw.look_at,
+            phase: GrenadePhase::Aim,
+            until: obs.tick.saturating_add(GRENADE_AIM_TICKS),
+        };
+        self.grenade = Some(act);
+        self.continue_throw(obs, act);
+    }
+
+    fn continue_throw(&mut self, obs: &BotObservation, mut act: GrenadeAct) {
+        if act.phase == GrenadePhase::Aim
+            && (self.motor.aimed_at(obs, act.look_at, 3.0) || obs.tick >= act.until)
+        {
+            act.phase = GrenadePhase::Hold;
+            act.until = obs.tick.saturating_add(GRENADE_HOLD_TICKS);
+        } else if act.phase == GrenadePhase::Hold && obs.tick >= act.until {
+            act.phase = GrenadePhase::Follow;
+            act.until = obs.tick.saturating_add(GRENADE_FOLLOW_TICKS);
+        } else if act.phase == GrenadePhase::Follow && obs.tick >= act.until {
+            self.thrown[usize::from(act.tactical)] += 1;
+            let wait = GRENADE_COOLDOWN_TICKS + (self.next_unit() * 240.0) as u32;
+            self.grenade_ready_tick = obs.tick.saturating_add(wait);
+            self.grenade = None;
+            return;
+        }
+        self.grenade = Some(act);
+        let held = act.phase == GrenadePhase::Hold;
+        self.intent = BotIntent {
+            look_at: Some(act.look_at),
+            move_goal: Some(obs.self_state.origin),
+            move_mode: MoveMode::Hold,
+            path: PathOutcome::Clear,
+            offhand: Some(act.weapon),
+            frag: held && !act.tactical,
+            smoke: held && act.tactical,
+            ..BotIntent::default()
+        };
+    }
+
+    /// Calls in the killstreak the script has handed over. Selecting its
+    /// weapon is what uses it; the airstrikes then want a point on the map,
+    /// and a marker or a sentry wants the trigger.
+    fn call_streak(&mut self, obs: &BotObservation) {
+        if self.grenade.is_some() || self.intent.use_button {
+            return;
+        }
+        if obs.self_state.locating {
+            self.intent.location_select = true;
+            self.intent.fire = false;
+            return;
+        }
+        let earned = obs
+            .self_state
+            .streak
+            .filter(|streak| streak.kind != StreakKind::Crewed);
+        let Some((weapon, kind, until)) = self.streak else {
+            let quiet = self.memory.currently_seen().next().is_none() && self.alert.is_none();
+            if let Some(streak) = earned
+                && quiet
+                && obs.tick >= self.streak_ready_tick
+                && obs.self_state.weapon_action == WeaponAction::Ready
+                && self.intent.weapon.is_none()
+                && !self.intent.reload
+            {
+                self.streak = Some((
+                    streak.weapon,
+                    streak.kind,
+                    obs.tick.saturating_add(STREAK_TICKS),
+                ));
+            }
+            return;
+        };
+        let still_held = earned.is_some_and(|streak| streak.weapon == weapon);
+        if !still_held || obs.tick >= until {
+            self.streak = None;
+            // Still in the slot when time ran out: it did not take. Leave it
+            // a while before asking again.
+            if still_held {
+                self.streak_ready_tick = obs.tick.saturating_add(STREAK_RETRY_TICKS);
+            }
+            return;
+        }
+        self.intent.weapon = Some(weapon);
+        self.intent.reload = false;
+        self.intent.fire = false;
+        self.intent.ads = false;
+        self.intent.melee = false;
+        self.intent.sprint = false;
+        if kind == StreakKind::Thrown
+            && obs.self_state.weapon == weapon
+            && obs.self_state.weapon_action == WeaponAction::Ready
+        {
+            // Out in front and level: a marker lands a short throw ahead, a
+            // sentry goes down where the bot is facing.
+            let (sin, cos) = obs.self_state.viewangles[1].to_radians().sin_cos();
+            let eye = obs.eye();
+            self.intent.look_at = Some([eye[0] + cos * 300.0, eye[1] + sin * 300.0, eye[2]]);
+            self.intent.move_mode = MoveMode::Hold;
+            self.intent.place_held = true;
         }
     }
 
@@ -1593,6 +1851,26 @@ impl HostController {
 /// position does not, and neither does a small move by the threat — that is the
 /// `anchor` distance below, not a grid cell, so no boundary makes one step
 /// count as a new engagement.
+/// One grenade, from deciding to throw it to the arm coming back down.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct GrenadeAct {
+    weapon: u16,
+    tactical: bool,
+    look_at: [f32; 3],
+    phase: GrenadePhase,
+    until: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum GrenadePhase {
+    /// Turning to the throwing angle.
+    Aim,
+    /// Button down: the pin is out.
+    Hold,
+    /// Button up: the throw is on its way out of the hand.
+    Follow,
+}
+
 /// How the weapon in hand is worked against one target at one range: sights,
 /// trigger discipline and how tight the aim has to be before a shot goes.
 #[derive(Clone, Copy, Debug, PartialEq)]

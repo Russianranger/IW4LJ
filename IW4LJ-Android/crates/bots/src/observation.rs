@@ -278,6 +278,92 @@ pub struct SelfState {
     pub attacker_yaw: Option<f32>,
     /// The bot's team has a radar sweep running.
     pub radar: bool,
+    /// The grenades of the class the bot spawned with, while it has any.
+    pub lethal: Option<Offhand>,
+    pub tactical: Option<Offhand>,
+    /// The earned killstreak sitting in the fourth action slot.
+    pub streak: Option<Streak>,
+    /// A killstreak is waiting for a point on the map to be chosen.
+    pub locating: bool,
+}
+
+/// What a thrown weapon does once it leaves the hand. Launch speed is along
+/// the view; `speed_up` is added straight up on top of it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ThrowFacts {
+    pub speed: f32,
+    pub speed_up: f32,
+    pub kind: ThrowKind,
+    pub fuse_ms: i32,
+    pub radius: f32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ThrowKind {
+    /// Explodes: frag, semtex.
+    Frag,
+    /// Blinds or stuns: flash, concussion.
+    Flash,
+    /// Smoke, throwing knives, placed equipment: nothing a bot throws yet.
+    Other,
+}
+
+impl ThrowKind {
+    /// The engine's `offhandClass`.
+    pub fn from_offhand_class(class: i32) -> Self {
+        match class {
+            1 => Self::Frag,
+            3 => Self::Flash,
+            _ => Self::Other,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Offhand {
+    pub weapon: u16,
+    pub ammo: i32,
+    pub facts: ThrowFacts,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Streak {
+    pub weapon: u16,
+    pub kind: StreakKind,
+}
+
+/// How an earned killstreak is called in once its weapon is in hand.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StreakKind {
+    /// Selecting the weapon is the whole of it: UAV, counter-UAV, EMP, attack
+    /// helicopters, the predator missile (which then flies unsteered).
+    Instant,
+    /// Selecting it opens the map for a target point: the airstrikes.
+    Location,
+    /// Selecting it puts something in the hand that the trigger throws or
+    /// places: care-package markers, the sentry gun.
+    Thrown,
+    /// Needs a gunner at the controls for its whole run. Left unused.
+    Crewed,
+}
+
+impl StreakKind {
+    /// Sorts a killstreak weapon by its script name. `None` for a weapon that
+    /// is not a killstreak at all.
+    pub fn from_script_name(name: &str) -> Option<Self> {
+        let name = name.to_ascii_lowercase();
+        if name.starts_with("airdrop_") || name.contains("sentry") {
+            return Some(Self::Thrown);
+        }
+        let streak = name.strip_prefix("killstreak_")?;
+        Some(if streak.contains("airstrike") {
+            Self::Location
+        } else if streak.contains("ac130") || streak.contains("helicopter_minigun") {
+            Self::Crewed
+        } else {
+            Self::Instant
+        })
+    }
 }
 
 pub const DEFAULT_OBJECTIVE_RADIUS: f32 = 96.0;
@@ -364,6 +450,17 @@ pub struct BotObservation {
 }
 
 impl BotObservation {
+    /// This observation with one objective struck out, for a bot that has
+    /// given up on it.
+    pub fn without_objective(&self, id: u32) -> Self {
+        let mut pruned = self.clone();
+        pruned.objectives.retain(|objective| objective.id != id);
+        if pruned.objective.is_some_and(|objective| objective.id == id) {
+            pruned.objective = pruned.objectives.first().copied();
+        }
+        pruned
+    }
+
     pub fn held(&self) -> Option<&WeaponSlot> {
         self.slot(self.self_state.weapon)
     }

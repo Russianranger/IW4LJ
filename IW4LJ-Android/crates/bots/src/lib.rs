@@ -1,4 +1,6 @@
 mod controller;
+mod fill;
+mod grenade;
 mod intent;
 mod memory;
 mod motor;
@@ -16,6 +18,7 @@ pub mod unique_loadout;
 mod weapon;
 
 pub use controller::HostController;
+pub use fill::FillMode;
 pub use intent::{BotIntent, MotorReport, MoveMode, PathOutcome};
 pub use nav::{
     NAV_HULL, NAV_SCHEMA, NavEdge, NavGraph, PathError, RouteStats, RouteStep, RouteWork,
@@ -24,8 +27,8 @@ pub use nav::{
 };
 pub use observation::{
     BotEvent, BotObservation, Contact, DEFAULT_OBJECTIVE_RADIUS, KnowledgeSource, ModeObjective,
-    ObjectiveAction, SelfState, Stance, TeamRole, Visibility, WeaponAction, WeaponClass,
-    WeaponFacts, WeaponSlot,
+    ObjectiveAction, Offhand, SelfState, Stance, Streak, StreakKind, TeamRole, ThrowFacts,
+    ThrowKind, Visibility, WeaponAction, WeaponClass, WeaponFacts, WeaponSlot,
 };
 pub use plugin::BotsPlugin;
 pub use query::{
@@ -33,8 +36,9 @@ pub use query::{
     SightSample, TraceBudget, WalkSample, WorldQuery,
 };
 pub use roster::{
-    BotAddQueue, BotAddRequest, BotDifficulty, BotFireQueue, BotHold, BotPlacement, BotPlacements,
-    BotRoster, BotSide, BotTpQueue, BotTpRequest, BotTpTarget, BotTpWhere, MAX_HOST_BOTS,
+    BotAddQueue, BotAddRequest, BotAutoFill, BotDifficulty, BotFireQueue, BotHold, BotPlacement,
+    BotPlacements, BotRoster, BotSide, BotTpQueue, BotTpRequest, BotTpTarget, BotTpWhere,
+    MAX_HOST_BOTS,
 };
 pub use sensor::{observe, observe_focused, observe_with};
 pub use skill::{BotSkill, SkillLevel};

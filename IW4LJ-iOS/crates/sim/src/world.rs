@@ -841,6 +841,12 @@ impl SimState {
             .filter(|&i| i != 0)
     }
 
+    /// The launch facts of a thrown weapon, for a host-side controller that
+    /// has to aim one. `None` for a weapon that is not a usable projectile.
+    pub fn equipment_throw_facts(&self, weapon: u32) -> Option<EquipmentRuntimeFacts> {
+        self.equipment_facts_for(weapon)
+    }
+
     pub(crate) fn equipment_facts_for(&self, weapon: u32) -> Option<EquipmentRuntimeFacts> {
         self.content
             .weapons()

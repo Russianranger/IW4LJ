@@ -48,6 +48,18 @@ pub struct BotIntent {
     /// Half-angle, in degrees, the view must be inside before the trigger is
     /// pulled. Narrow at range, wide up close.
     pub fire_cone_deg: f32,
+    /// The grenade the command names as its offhand, for as long as one is
+    /// being thrown.
+    pub offhand: Option<u16>,
+    /// The lethal and tactical grenade buttons. Held to pull the pin, let go
+    /// to throw.
+    pub frag: bool,
+    pub smoke: bool,
+    /// Confirms the point a killstreak's map is asking for.
+    pub location_select: bool,
+    /// Works the trigger on something that is not a gun: throws the marker or
+    /// sets down the sentry in hand. Not a shot, so it asks no target.
+    pub place_held: bool,
     /// The weapon the command asks for. `None` keeps the observed weapon; a
     /// selection is held through every phase of the change, not pulsed once.
     pub weapon: Option<u16>,
@@ -73,6 +85,11 @@ impl Default for BotIntent {
             tap_fire: false,
             burst: false,
             fire_cone_deg: DEFAULT_FIRE_CONE_DEG,
+            offhand: None,
+            frag: false,
+            smoke: false,
+            location_select: false,
+            place_held: false,
             weapon: None,
             path: PathOutcome::None,
         }

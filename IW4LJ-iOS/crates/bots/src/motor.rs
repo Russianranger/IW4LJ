@@ -181,7 +181,9 @@ impl Motor {
             weapon_mapped: weapon,
             ..UserCmd::default()
         };
-        if self.pull_trigger(obs, intent) {
+        if self.pull_trigger(obs, intent)
+            || (intent.place_held && self.on_target(obs, intent, DEFAULT_FIRE_CONE_DEG))
+        {
             cmd.buttons |= buttons::ATTACK;
         }
         if intent.melee && self.on_target(obs, intent, DEFAULT_FIRE_CONE_DEG) {
@@ -198,6 +200,20 @@ impl Motor {
         }
         if intent.jump {
             cmd.buttons |= buttons::JUMP;
+        }
+        if let Some(offhand) = intent.offhand {
+            cmd.off_hand_index = offhand;
+        }
+        if intent.frag {
+            cmd.buttons |= buttons::FRAG;
+        }
+        if intent.smoke {
+            cmd.buttons |= buttons::SMOKE;
+        }
+        // The selected point is left at its zero value, which the map reads
+        // as its own centre.
+        if intent.location_select {
+            cmd.buttons |= buttons::LOCATION_SELECT;
         }
         if intent.sprint
             && walking
@@ -245,9 +261,13 @@ impl Motor {
     }
 
     fn on_target(&self, obs: &BotObservation, intent: &BotIntent, cone_deg: f32) -> bool {
-        let Some(at) = intent.look_at else {
-            return false;
-        };
+        intent
+            .look_at
+            .is_some_and(|at| self.aimed_at(obs, at, cone_deg))
+    }
+
+    /// Whether the view has come within `cone_deg` of a point.
+    pub fn aimed_at(&self, obs: &BotObservation, at: [f32; 3], cone_deg: f32) -> bool {
         let desire = look_angles(obs.eye(), at);
         angle_subtract(desire[1], self.yaw).abs() <= cone_deg
             && (desire[0] - self.pitch).abs() <= cone_deg

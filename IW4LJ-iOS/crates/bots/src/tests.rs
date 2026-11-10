@@ -10,8 +10,8 @@ use crate::controller::HostController;
 use crate::intent::MoveMode;
 use crate::memory::Memory;
 use crate::observation::{
-    BotEvent, BotObservation, Contact, KnowledgeSource, SelfState, Stance, WeaponAction,
-    WeaponClass, WeaponFacts, WeaponSlot,
+    BotEvent, BotObservation, Contact, KnowledgeSource, ModeObjective, Offhand, SelfState, Stance,
+    Streak, StreakKind, ThrowFacts, ThrowKind, WeaponAction, WeaponClass, WeaponFacts, WeaponSlot,
 };
 use crate::query::{HullTrace, ObstacleKind, QueryResult, SightSample, WorldQuery};
 use crate::roster::default_class_index;
@@ -114,6 +114,10 @@ fn me(id: u32, field: &Field) -> SelfState {
         damage_event: 0,
         attacker_yaw: None,
         radar: false,
+        lethal: None,
+        tactical: None,
+        streak: None,
+        locating: false,
     }
 }
 
@@ -586,5 +590,204 @@ fn a_sound_with_no_route_to_it_is_given_up_on_not_stared_at() {
     assert!(
         investigating <= 2,
         "held on an unreachable sound for {investigating} of 40 thinks"
+    );
+}
+
+const FRAG: Offhand = Offhand {
+    weapon: 31,
+    ammo: 1,
+    facts: ThrowFacts {
+        speed: 900.0,
+        speed_up: 120.0,
+        kind: ThrowKind::Frag,
+        fuse_ms: 3500,
+        radius: 256.0,
+    },
+};
+
+/// Drives a bot that keeps hearing one enemy it cannot see, and returns every
+/// command it produced.
+fn hear(brain: &mut HostController, field: &mut Field, at: [f32; 3], thinks: u32) -> Vec<UserCmd> {
+    (0..thinks)
+        .map(|step| {
+            let tick = 1 + step * 2;
+            let mut obs = observe(
+                tick,
+                SelfState {
+                    lethal: Some(FRAG),
+                    ..me(1, field)
+                },
+                field,
+            );
+            obs.heard.push(enemy(9, at, tick, KnowledgeSource::Heard));
+            brain.drive(&obs, &mut *field, THINK_MS)
+        })
+        .collect()
+}
+
+#[test]
+fn a_heard_enemy_in_reach_gets_one_grenade_pulled_then_thrown() {
+    let mut field = Field::open(WeaponClass::Assault);
+    let mut brain = HostController::with_skill(CALM_SEED, SkillLevel::Veteran);
+    let cmds = hear(&mut brain, &mut field, [800.0, 0.0, 0.0], 400);
+    let held: Vec<bool> = cmds
+        .iter()
+        .map(|cmd| cmd.buttons & buttons::FRAG != 0)
+        .collect();
+    let pulls = held.windows(2).filter(|pair| !pair[0] && pair[1]).count();
+    assert_eq!(pulls, 1, "one lethal a life, and it is used");
+    assert!(
+        held.windows(2).any(|pair| pair[0] && !pair[1]),
+        "a pin that is pulled is let go"
+    );
+    for cmd in cmds.iter().filter(|cmd| cmd.buttons & buttons::FRAG != 0) {
+        assert_eq!(
+            cmd.off_hand_index, FRAG.weapon,
+            "the command names the grenade"
+        );
+        assert_eq!(cmd.buttons & buttons::ATTACK, 0);
+        assert!(
+            cmd.angles[0] < 0,
+            "a throw at 800 units is lobbed above the horizon"
+        );
+    }
+}
+
+#[test]
+fn no_grenade_is_thrown_too_close_through_a_wall_or_by_a_recruit() {
+    let quiet = |cmds: &[UserCmd]| cmds.iter().all(|cmd| cmd.buttons & buttons::FRAG == 0);
+
+    let mut field = Field::open(WeaponClass::Assault);
+    let mut brain = HostController::with_skill(CALM_SEED, SkillLevel::Veteran);
+    assert!(
+        quiet(&hear(&mut brain, &mut field, [200.0, 0.0, 0.0], 200)),
+        "inside its own blast"
+    );
+
+    let mut field = Field::open(WeaponClass::Assault);
+    field.walled = true;
+    let mut brain = HostController::with_skill(CALM_SEED, SkillLevel::Veteran);
+    assert!(
+        quiet(&hear(&mut brain, &mut field, [800.0, 0.0, 0.0], 200)),
+        "the arc is blocked"
+    );
+
+    let mut field = Field::open(WeaponClass::Assault);
+    let mut brain = HostController::with_skill(CALM_SEED, SkillLevel::Recruit);
+    assert!(
+        quiet(&hear(&mut brain, &mut field, [800.0, 0.0, 0.0], 200)),
+        "recruits keep their grenades"
+    );
+}
+
+/// Drives a bot holding an earned killstreak through `thinks` quiet thinks.
+/// `world` stands in for the script: it sees each command and decides what the
+/// bot observes next.
+fn earn(
+    kind: StreakKind,
+    thinks: u32,
+    mut world: impl FnMut(&UserCmd, &mut SelfState),
+) -> Vec<UserCmd> {
+    const STREAK: u16 = 77;
+    let mut field = Field::open(WeaponClass::Assault);
+    let mut brain = HostController::with_skill(CALM_SEED, SkillLevel::Regular);
+    let mut state = SelfState {
+        streak: Some(Streak {
+            weapon: STREAK,
+            kind,
+        }),
+        ..me(1, &field)
+    };
+    (0..thinks)
+        .map(|step| {
+            let obs = observe(1 + step * 2, state, &field);
+            let cmd = brain.drive(&obs, &mut field, THINK_MS);
+            world(&cmd, &mut state);
+            cmd
+        })
+        .collect()
+}
+
+#[test]
+fn an_instant_killstreak_is_called_in_by_selecting_its_weapon() {
+    let cmds = earn(StreakKind::Instant, 30, |cmd, state| {
+        // The script uses it the moment it is in hand, and takes it back.
+        if cmd.weapon == 77 {
+            state.streak = None;
+        }
+    });
+    assert!(cmds.iter().any(|cmd| cmd.weapon == 77));
+    assert_eq!(
+        cmds.last().unwrap().weapon,
+        RIFLE,
+        "and the rifle comes back"
+    );
+}
+
+#[test]
+fn an_airstrike_confirms_the_map_and_a_marker_is_thrown() {
+    let cmds = earn(StreakKind::Location, 40, |cmd, state| {
+        if cmd.weapon == 77 {
+            state.locating = true;
+        }
+        if cmd.buttons & buttons::LOCATION_SELECT != 0 {
+            state.locating = false;
+            state.streak = None;
+        }
+    });
+    assert!(
+        cmds.iter()
+            .any(|cmd| cmd.buttons & buttons::LOCATION_SELECT != 0)
+    );
+
+    let cmds = earn(StreakKind::Thrown, 40, |cmd, state| {
+        if cmd.weapon == 77 {
+            state.weapon = 77;
+        }
+        if cmd.buttons & buttons::ATTACK != 0 {
+            state.weapon = RIFLE;
+            state.streak = None;
+        }
+    });
+    assert!(cmds.iter().any(|cmd| cmd.buttons & buttons::ATTACK != 0));
+}
+
+#[test]
+fn a_crewed_killstreak_is_left_alone_and_a_failed_one_is_not_spammed() {
+    let cmds = earn(StreakKind::Crewed, 40, |_, _| {});
+    assert!(cmds.iter().all(|cmd| cmd.weapon == RIFLE));
+
+    // The script never takes it: the bot stops asking and goes back to its gun.
+    let cmds = earn(StreakKind::Instant, 120, |_, _| {});
+    let asking = cmds.iter().filter(|cmd| cmd.weapon == 77).count();
+    assert!(asking > 0 && asking < 70, "asked on {asking} of 120 thinks");
+    assert_eq!(cmds.last().unwrap().weapon, RIFLE);
+}
+
+#[test]
+fn a_care_package_is_opened_with_use_and_given_up_on_if_it_never_opens() {
+    let mut field = Field::open(WeaponClass::Assault);
+    let mut brain = HostController::with_skill(CALM_SEED, SkillLevel::Regular);
+    let crate_drop = ModeObjective {
+        id: 4,
+        touching: true,
+        use_button: true,
+        radius: 56.0,
+        ..ModeObjective::at([20.0, 0.0, 0.0])
+    };
+    let mut used = 0;
+    let mut last = UserCmd::default();
+    for step in 0..400 {
+        let mut obs = observe(1 + step * 2, me(1, &field), &field);
+        obs.objectives.push(crate_drop);
+        obs.objective = Some(crate_drop);
+        last = brain.drive(&obs, &mut field, THINK_MS);
+        used += u32::from(last.buttons & buttons::USE != 0);
+    }
+    assert!(used > 20, "use was held on the crate: {used} thinks");
+    assert_eq!(
+        last.buttons & buttons::USE,
+        0,
+        "a crate that never opens is walked away from"
     );
 }

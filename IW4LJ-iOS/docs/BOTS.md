@@ -64,7 +64,26 @@ waited for, knife reach is knifed. Aim wanders inside the skill's error and
 tightens on a held target. With nothing in sight a bot walks to where an enemy
 was last seen or heard, and roams only when it knows of none.
 
-Not done: grenades and equipment, killstreak use, mantling and ladders.
+**Lobby fill.** A hosted match with no bot counts in its rules is filled as it
+starts (`fill.rs`): 12 players in team modes, 8 in free-for-all, 8 and 6 on a
+map whose spawns span under 2400 units. `bot fill off|auto|<players>` sets it,
+saved to `$HOME/bot_fill.txt` (`IW4L_BOT_FILL` overrides).
+
+**Grenades.** Above recruit, a bot throws its class's frag-class lethal (one a
+life) or flash-class tactical (two) at an enemy placed in the last second or so
+that it has no shot at, 380 to 1150 units out. `grenade.rs` solves the flattest
+arc from the weapon's own launch speeds and refuses one that meets a wall on
+the way. Smoke, throwing knives, claymores and C4 are not used.
+
+**Killstreaks.** The script puts an earned streak in action slot 4; with
+nothing in sight the bot selects that weapon, which is what uses it. Airstrikes
+are confirmed on the map's centre; a care-package marker or sentry is put down
+in front. Care packages are opened by walking to their compass icon and holding
+use. The AC-130 and chopper gunner need a gunner and are left unused; a predator
+missile is launched but not steered.
+
+Not done: aiming airstrikes and the predator at enemies, crewed killstreaks,
+claymores and C4, cooking grenades, mantling and ladders.
 
 `HostController::decision()` exposes scores, stage and objective; the periodic
 aggregate adds per-subsystem query counts and stuck bots. Both read live from a

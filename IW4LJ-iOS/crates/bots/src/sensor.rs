@@ -2,8 +2,8 @@ use math_iw4::{angle_normalize_360, angle_vectors};
 use sim::{ClientId, ClientLifecycle, RadarMode, Snapshot};
 
 use crate::observation::{
-    BotObservation, Contact, DEFAULT_OBJECTIVE_RADIUS, KnowledgeSource, ModeObjective, SelfState,
-    Visibility, WeaponAction, WeaponSlot,
+    BotObservation, Contact, DEFAULT_OBJECTIVE_RADIUS, KnowledgeSource, ModeObjective, Offhand,
+    SelfState, Streak, Visibility, WeaponAction, WeaponSlot,
 };
 use crate::query::{QuerySubsystem, SightSample, WorldQuery};
 use crate::skill::BotSkill;
@@ -24,6 +24,8 @@ const GUNFIRE_HEAR_IN: f32 = 2800.0;
 /// the speed below and are not heard.
 const FOOTSTEP_HEAR_IN: f32 = 260.0;
 const FOOTSTEP_SPEED: f32 = 150.0;
+/// How close the feet have to be to a care package to open it.
+const CRATE_USE_RADIUS: f32 = 56.0;
 
 pub fn observe(
     snapshot: &Snapshot,
@@ -84,6 +86,10 @@ pub fn observe_with(
         damage_event: ps.damage_event,
         attacker_yaw: attacker_yaw(ps),
         radar: meta.radar != RadarMode::Off && !meta.radar_blocked,
+        lethal: own_offhand(meta, world, |loadout| loadout.lethal),
+        tactical: own_offhand(meta, world, |loadout| loadout.tactical),
+        streak: earned_streak(ps, world),
+        locating: meta.location_selection.is_some(),
     };
     let inventory = own_inventory(ps, meta, world);
     let mut seen = Vec::new();
@@ -255,6 +261,44 @@ fn in_range_and_fov(from: [f32; 3], to: [f32; 3], forward: [f32; 3], min_dot: f3
     dir[0] * forward[0] + dir[1] * forward[1] + dir[2] * forward[2] >= min_dot
 }
 
+/// A grenade slot of the class the bot spawned with, with the ammunition the
+/// match state holds for it. A slot the match keeps no count for is taken to
+/// hold one; the controller's own per-life limit keeps that honest.
+fn own_offhand(
+    meta: &sim::ClientSnapshotMeta,
+    world: &impl WorldQuery,
+    slot: impl Fn(&sim::LoadoutSpec) -> u32,
+) -> Option<Offhand> {
+    let id = slot(meta.loadout.as_ref()?);
+    let weapon = u16::try_from(id).ok().filter(|weapon| *weapon != 0)?;
+    let facts = world.throw_facts(weapon)?;
+    let ammo = meta
+        .ammo_by_weapon
+        .iter()
+        .find(|(owned, _, _)| *owned == id)
+        .map_or(1, |(_, clip, stock)| clip + stock);
+    (ammo > 0).then_some(Offhand {
+        weapon,
+        ammo,
+        facts,
+    })
+}
+
+/// The killstreak the script has put in the fourth action slot, which is where
+/// a player finds it too.
+fn earned_streak(ps: &playerstate_iw4::PlayerState, world: &impl WorldQuery) -> Option<Streak> {
+    const SLOT: usize = 3;
+    const SLOT_HOLDS_WEAPON: i32 = 1;
+    if ps.action_slot_type[SLOT] != SLOT_HOLDS_WEAPON {
+        return None;
+    }
+    let weapon = u16::try_from(ps.action_slot_param[SLOT]).ok()?;
+    Some(Streak {
+        weapon,
+        kind: world.streak_kind(weapon)?,
+    })
+}
+
 /// The bot's own carried weapons with the ammunition the match state holds for
 /// them. Enemy inventories and positions are never read here.
 fn own_inventory(
@@ -366,14 +410,25 @@ fn public_objectives(snapshot: &Snapshot, bot: ClientId, team: i32) -> Vec<ModeO
                 && !o.icon.contains("defend")
                 && !o.icon.starts_with("compassping")
         })
-        .map(|o| ModeObjective {
-            id: u32::from(o.index),
-            origin: o.origin,
-            touching: feet.is_some_and(|f| {
-                dist2([f[0], f[1], 0.0], [o.origin[0], o.origin[1], 0.0])
-                    <= DEFAULT_OBJECTIVE_RADIUS * DEFAULT_OBJECTIVE_RADIUS
-            }),
-            ..ModeObjective::at(o.origin)
+        .map(|o| {
+            // A care package is marked with the ammo icon. It is opened by
+            // standing at it and holding use, not by standing near it.
+            let crate_drop = o.icon.contains("objpoint_ammo");
+            let radius = if crate_drop {
+                CRATE_USE_RADIUS
+            } else {
+                DEFAULT_OBJECTIVE_RADIUS
+            };
+            ModeObjective {
+                id: u32::from(o.index),
+                origin: o.origin,
+                touching: feet.is_some_and(|f| {
+                    dist2([f[0], f[1], 0.0], [o.origin[0], o.origin[1], 0.0]) <= radius * radius
+                }),
+                use_button: crate_drop,
+                radius,
+                ..ModeObjective::at(o.origin)
+            }
         })
         .collect()
 }

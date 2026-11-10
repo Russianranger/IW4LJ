@@ -1,7 +1,7 @@
 use bevy::prelude::*;
 use bots::{
-    BotAddQueue, BotDifficulty, BotFireQueue, BotHold, BotRoster, BotTpQueue, BotTpRequest,
-    BotTpTarget, BotTpWhere, SkillLevel,
+    BotAddQueue, BotAutoFill, BotDifficulty, BotFireQueue, BotHold, BotRoster, BotTpQueue,
+    BotTpRequest, BotTpTarget, BotTpWhere, FillMode, SkillLevel,
 };
 use hud::PendingSplash;
 use net::ClientActionInbox;
@@ -36,11 +36,12 @@ pub(crate) fn route_debug_feature_commands(
         ResMut<ConsoleLine>,
     ),
     mut bot_add: ResMut<BotAddQueue>,
-    (mut bot_hold, mut bot_tp, mut bot_fire, mut bot_skill): (
+    (mut bot_hold, mut bot_tp, mut bot_fire, mut bot_skill, mut bot_fill): (
         ResMut<BotHold>,
         ResMut<BotTpQueue>,
         ResMut<BotFireQueue>,
         ResMut<BotDifficulty>,
+        ResMut<BotAutoFill>,
     ),
     (weapons, mut inbox, mut give_seq, roster): (
         Option<Res<assets::PreparedWeapons>>,
@@ -89,6 +90,21 @@ pub(crate) fn route_debug_feature_commands(
                 Ok(BotVerb::Skill(Some(level))) => {
                     bot_skill.set(level);
                     echo(format!("bot: skill {}", level.label()), console, line);
+                }
+                Ok(BotVerb::Fill(None)) => {
+                    echo(
+                        format!("bot: fill is {}", bot_fill.0.label()),
+                        console,
+                        line,
+                    );
+                }
+                Ok(BotVerb::Fill(Some(mode))) => {
+                    bot_fill.set(mode);
+                    echo(
+                        format!("bot: fill {} from the next match", mode.label()),
+                        console,
+                        line,
+                    );
                 }
                 Ok(BotVerb::Hold(on)) => {
                     bot_hold.0 = on;
@@ -306,7 +322,7 @@ pub fn register_feature_commands(registry: &mut crate::ConsoleRegistry, maps: &[
         ),
         (
             "bot",
-            "bot add [N] | dummy [N] | skill [recruit|regular|hardened|veteran] | hold [on|off] | give <id> <weapon> [att...] [camo=<name>] | fire [all|<id>] | tp all|<id> above <h> | tp all|<id> <x> <y> <z>",
+            "bot add [N] | dummy [N] | fill [off|auto|<players>] | skill [recruit|regular|hardened|veteran] | hold [on|off] | give <id> <weapon> [att...] [camo=<name>] | fire [all|<id>] | tp all|<id> above <h> | tp all|<id> <x> <y> <z>",
         ),
         (
             "menu",
@@ -328,7 +344,7 @@ pub fn register_feature_commands(registry: &mut crate::ConsoleRegistry, maps: &[
     }
 }
 
-pub(crate) const BOT_USAGE: &str = "usage: bot add [N] | dummy [N] | skill [recruit|regular|hardened|veteran] | hold [on|off] | give <id> <weapon> [att...] [camo=<name>] | fire [all|<id>] | tp all|<id> above <h> | tp all|<id> <x> <y> <z> [yaw] [pitch]";
+pub(crate) const BOT_USAGE: &str = "usage: bot add [N] | dummy [N] | fill [off|auto|<players>] | skill [recruit|regular|hardened|veteran] | hold [on|off] | give <id> <weapon> [att...] [camo=<name>] | fire [all|<id>] | tp all|<id> above <h> | tp all|<id> <x> <y> <z> [yaw] [pitch]";
 
 #[derive(Debug, PartialEq)]
 pub(crate) enum BotVerb {
@@ -336,6 +352,8 @@ pub(crate) enum BotVerb {
     Dummy(u32),
     /// `None` asks what the difficulty is; a level sets it for every bot.
     Skill(Option<SkillLevel>),
+    /// `None` asks what the fill is; a mode sets it for the matches after.
+    Fill(Option<FillMode>),
     Hold(bool),
     Give {
         id: ClientId,
@@ -378,6 +396,14 @@ pub(crate) fn parse_bot_args(args: &[String]) -> Result<BotVerb, String> {
                 .map(|level| BotVerb::Skill(Some(level)))
                 .ok_or_else(|| {
                     format!("usage: bot skill [recruit|regular|hardened|veteran] (got `{token}`)")
+                }),
+        },
+        "fill" => match args.get(1) {
+            None => Ok(BotVerb::Fill(None)),
+            Some(token) => FillMode::from_token(token)
+                .map(|mode| BotVerb::Fill(Some(mode)))
+                .ok_or_else(|| {
+                    format!("usage: bot fill [off|auto|<players 2-18>] (got `{token}`)")
                 }),
         },
         "hold" => match args.get(1).map(String::as_str) {

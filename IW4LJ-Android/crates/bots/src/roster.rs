@@ -2,6 +2,7 @@ use bevy::prelude::Resource;
 use sim::{ClientId, LifeSequence};
 
 use crate::controller::HostController;
+use crate::fill::FillMode;
 use crate::skill::SkillLevel;
 
 pub const MAX_HOST_BOTS: u32 = 20;
@@ -163,7 +164,42 @@ impl BotDifficulty {
 }
 
 fn skill_path() -> Option<std::path::PathBuf> {
-    std::env::var_os("HOME").map(|home| std::path::PathBuf::from(home).join("bot_skill.txt"))
+    saved_path("bot_skill.txt")
+}
+
+fn saved_path(name: &str) -> Option<std::path::PathBuf> {
+    std::env::var_os("HOME").map(|home| std::path::PathBuf::from(home).join(name))
+}
+
+/// Whether a hosted match is filled with bots as it starts, and to what size.
+/// Kept and saved the way the difficulty is; `IW4L_BOT_FILL` overrides the
+/// file. Bot counts the host set in the game rules win over it.
+#[derive(Resource, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BotAutoFill(pub FillMode);
+
+impl Default for BotAutoFill {
+    fn default() -> Self {
+        let saved = std::env::var("IW4L_BOT_FILL").ok().or_else(|| {
+            saved_path("bot_fill.txt").and_then(|path| std::fs::read_to_string(path).ok())
+        });
+        Self(
+            saved
+                .as_deref()
+                .and_then(FillMode::from_token)
+                .unwrap_or_default(),
+        )
+    }
+}
+
+impl BotAutoFill {
+    pub fn set(&mut self, mode: FillMode) {
+        self.0 = mode;
+        if let Some(path) = saved_path("bot_fill.txt")
+            && let Err(error) = std::fs::write(&path, mode.label())
+        {
+            diag::warn!(Sim, "bots: fill not saved to {}: {error}", path.display());
+        }
+    }
 }
 
 /// Bots waiting to be stood where they were asked to be. A bot is not alive

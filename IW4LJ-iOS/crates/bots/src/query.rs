@@ -4,7 +4,9 @@ use sim::{
 };
 use sim::{ClientId, SimWorld};
 
-use crate::observation::{ModeObjective, WeaponClass, WeaponFacts};
+use crate::observation::{
+    ModeObjective, StreakKind, ThrowFacts, ThrowKind, WeaponClass, WeaponFacts,
+};
 
 /// CONTENTS_GLASS as in `weapon_iw4`. Sight omits it; shots do not.
 const CONTENTS_GLASS: u32 = 0x10;
@@ -223,6 +225,17 @@ pub trait WorldQuery {
     fn weapon_silenced(&self, _weapon: u16) -> bool {
         false
     }
+
+    /// How a thrown weapon leaves the hand. `None` for anything that is not
+    /// thrown.
+    fn throw_facts(&self, _weapon: u16) -> Option<ThrowFacts> {
+        None
+    }
+
+    /// How a killstreak weapon is called in. `None` for an ordinary weapon.
+    fn streak_kind(&self, _weapon: u16) -> Option<StreakKind> {
+        None
+    }
 }
 
 /// Counts the collision operations a composite check issues without charging
@@ -277,6 +290,14 @@ impl<W: WorldQuery> WorldQuery for Primitives<'_, W> {
 
     fn weapon_silenced(&self, weapon: u16) -> bool {
         self.world.weapon_silenced(weapon)
+    }
+
+    fn throw_facts(&self, weapon: u16) -> Option<ThrowFacts> {
+        self.world.throw_facts(weapon)
+    }
+
+    fn streak_kind(&self, weapon: u16) -> Option<StreakKind> {
+        self.world.streak_kind(weapon)
     }
 }
 
@@ -370,6 +391,14 @@ impl<W: WorldQuery> WorldQuery for Budgeted<'_, W> {
     fn weapon_silenced(&self, weapon: u16) -> bool {
         self.world.weapon_silenced(weapon)
     }
+
+    fn throw_facts(&self, weapon: u16) -> Option<ThrowFacts> {
+        self.world.throw_facts(weapon)
+    }
+
+    fn streak_kind(&self, weapon: u16) -> Option<StreakKind> {
+        self.world.streak_kind(weapon)
+    }
 }
 
 impl WorldQuery for SimWorld {
@@ -452,6 +481,21 @@ impl WorldQuery for SimWorld {
     fn weapon_silenced(&self, weapon: u16) -> bool {
         self.weapon_script_name(u32::from(weapon))
             .contains("silencer")
+    }
+
+    fn throw_facts(&self, weapon: u16) -> Option<ThrowFacts> {
+        let facts = self.equipment_throw_facts(u32::from(weapon))?;
+        Some(ThrowFacts {
+            speed: facts.projectile_speed as f32,
+            speed_up: facts.projectile_speed_up as f32,
+            kind: ThrowKind::from_offhand_class(facts.offhand_class),
+            fuse_ms: facts.fuse_time_ms,
+            radius: facts.explosion_radius as f32,
+        })
+    }
+
+    fn streak_kind(&self, weapon: u16) -> Option<StreakKind> {
+        StreakKind::from_script_name(self.weapon_script_name(u32::from(weapon)))
     }
 }
 

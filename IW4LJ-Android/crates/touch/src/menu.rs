@@ -332,8 +332,10 @@ const TABS: [Tab; 8] = [
     },
     Tab {
         name: "BOTS",
-        hint: "Bots join the match you are hosting. SKILL sets how well every bot aims, reacts and hears, now and for bots added later; it is remembered. A still bot never moves or shoots.",
+        hint: "AUTO-FILL adds a full lobby of bots by itself when a match you host starts: 12 players in team modes, 8 in free-for-all, fewer on a small map. Turn it OFF for a LAN game against a friend. SKILL sets how well every bot aims, reacts and hears. Both are remembered. A still bot never moves or shoots.",
         items: &[
+            line("AUTO-FILL ON", "bot fill auto"),
+            line("AUTO-FILL OFF", "bot fill off"),
             line("ADD 1 BOT", "bot add 1"),
             line("ADD 5 BOTS", "bot add 5"),
             line("SKILL RECRUIT", "bot skill recruit"),
